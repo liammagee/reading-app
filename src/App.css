@@ -725,3 +725,119 @@
     grid-template-columns: 1fr;
   }
 }
+
+@media (max-width: 900px) {
+  .app-shell {
+    padding: 36px 18px 64px;
+  }
+
+  .panel {
+    padding: 20px;
+  }
+
+  .reader-display {
+    min-height: 140px;
+  }
+
+  .focus-rail {
+    height: 60%;
+  }
+}
+
+@media (max-width: 720px) {
+  .hero-actions {
+    flex-wrap: wrap;
+  }
+
+  .layout {
+    gap: 18px;
+  }
+
+  .reader-display {
+    padding: 0 20px;
+    font-size: clamp(1.8rem, 5vw, 2.6rem);
+  }
+
+  .controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .slider {
+    grid-template-columns: 1fr;
+  }
+
+  .slider strong {
+    justify-self: start;
+  }
+
+  .meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .toggle-row {
+    gap: 8px;
+  }
+}
+
+@media (max-width: 560px) {
+  .app-shell {
+    padding: 28px 14px 56px;
+  }
+
+  .panel {
+    padding: 18px;
+  }
+
+  .reader-display {
+    min-height: 120px;
+  }
+
+  .controls {
+    grid-template-columns: 1fr;
+  }
+
+  .controls button,
+  .companion button {
+    padding: 12px 14px;
+  }
+
+  .bookmark-row {
+    flex-wrap: wrap;
+  }
+
+  .bookmarks-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .toggle-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .tts-header,
+  .camera-header,
+  .session-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .snippet.full {
+    max-height: 280px;
+  }
+
+  .field-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 420px) {
+  .reader-display {
+    padding: 0 16px;
+  }
+
+  .display-chunk {
+    padding: 0 12px;
+  }
+}
