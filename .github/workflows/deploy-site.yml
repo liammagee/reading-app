@@ -14,5 +14,5 @@ jobs:
         with:
           token: ${{ secrets.MAIN_REPO_PAT }}
           repository: liammagee/machinespirits
-          event-type: content-updated
-          client-payload: '{"ref": "${{ github.ref }}", "sha": "${{ github.sha }}", "source": "reading-app"}'
+          event-type: reading-app-updated
+          client-payload: '{"ref": "${{ github.ref }}", "sha": "${{ github.sha }}"}'
