@@ -1,0 +1,64 @@
+:root {
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #1b1a15;
+  background-color: #f5f1e8;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  --ink: #1b1a15;
+  --ink-muted: #4b463f;
+  --paper: #f5f1e8;
+  --paper-strong: #ede6d6;
+  --accent: #e4572e;
+  --accent-soft: #f6bfa5;
+  --sky: #dbe6e2;
+  --panel: rgba(255, 255, 255, 0.76);
+  --panel-border: rgba(27, 26, 21, 0.12);
+  --shadow: rgba(20, 18, 12, 0.16);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: radial-gradient(circle at top, #f8f4ea 0%, #dbe6e2 60%, #f5f1e8 100%);
+  color: var(--ink);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(120deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0)),
+    repeating-linear-gradient(90deg, rgba(27, 26, 21, 0.05) 0 1px, transparent 1px 28px);
+  opacity: 0.6;
+  z-index: 0;
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+  color: inherit;
+}
+
+textarea {
+  resize: vertical;
+}
