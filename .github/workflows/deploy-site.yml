@@ -1,0 +1,18 @@
+name: Deploy Site on Reading App Update
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  trigger-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger main site rebuild
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.MAIN_REPO_PAT }}
+          repository: liammagee/machinespirits
+          event-type: content-updated
+          client-payload: '{"ref": "${{ github.ref }}", "sha": "${{ github.sha }}", "source": "reading-app"}'
