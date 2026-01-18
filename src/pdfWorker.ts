@@ -1,6 +1,8 @@
 import { getDocument } from 'pdfjs-dist';
 import { tokenize } from './textUtils';
 
+declare const self: Worker;
+
 type PdfOutlineItem = {
   title: string;
   pageNumber: number | null;
@@ -44,7 +46,7 @@ const extractPdfData = async (
   data: ArrayBuffer,
   onProgress?: (current: number, total: number) => void,
 ) => {
-  const loadingTask = getDocument({ data: new Uint8Array(data), disableWorker: true });
+  const loadingTask = getDocument({ data: new Uint8Array(data) });
   try {
     const pdf = await loadingTask.promise;
     const pageTexts: string[] = [];
@@ -108,9 +110,7 @@ const extractPdfData = async (
   }
 };
 
-const ctx = self as unknown as DedicatedWorkerGlobalScope;
-
-ctx.addEventListener('message', (event) => {
+self.addEventListener('message', (event: MessageEvent) => {
   const data = event.data as ExtractRequest;
   if (!data || data.type !== 'extract') return;
   const { id, buffer } = data;
@@ -118,14 +118,14 @@ ctx.addEventListener('message', (event) => {
     try {
       const payload = await extractPdfData(buffer, (current, total) => {
         const progress: ProgressMessage = { id, type: 'progress', current, total };
-        ctx.postMessage(progress);
+        self.postMessage(progress);
       });
       const result: ResultMessage = { id, type: 'result', ok: true, payload };
-      ctx.postMessage(result);
+      self.postMessage(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to extract PDF.';
       const result: ResultMessage = { id, type: 'result', ok: false, error: message };
-      ctx.postMessage(result);
+      self.postMessage(result);
     }
   })();
 });
