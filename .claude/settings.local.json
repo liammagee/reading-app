@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(fly launch)",
+      "Bash(fly apps destroy:*)"
+    ]
+  }
+}

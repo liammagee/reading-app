@@ -1,9 +1,28 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  forwardRef,
+  memo,
+  startTransition,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { buildApiUrl } from './env';
+import {
+  BOOKMARK_VERSION,
+  type BookmarkPayload,
+  buildBookmarkUrl,
+  hashText,
+  parseBookmarkValue,
+  readBookmarkParam,
+} from './bookmarkUtils';
+import { segmentTextBySentence, segmentTokens, tokenize, type Granularity, type Segment } from './textUtils';
 import './App.css';
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -21,6 +40,9 @@ type SavedSession = {
   index: number;
   wpm: number;
   chunkSize: number;
+  granularity?: Granularity;
+  contextRadius?: number;
+  minWordMs?: number;
   sentencePauseMs?: number;
   sessionElapsedMs?: number;
   title: string;
@@ -31,17 +53,20 @@ type SavedSession = {
 
 type LastDocument = {
   sourceText: string;
-  parallelText?: string;
+  secondaryText?: string;
   title?: string;
   sourceKind?: 'text' | 'pdf';
   primaryFileMeta?: FileMeta | null;
+  secondaryFileMeta?: FileMeta | null;
+  primaryLanguage?: string;
+  secondaryLanguage?: string;
 };
 
 type UserPreferences = {
   showConventional?: boolean;
-  showParallel?: boolean;
   conventionalSeekEnabled?: boolean;
   autoFollowConventional?: boolean;
+  showBilingual?: boolean;
   cameraEnabled?: boolean;
   cameraHandEnabled?: boolean;
   cameraEyeEnabled?: boolean;
@@ -112,29 +137,11 @@ const LAST_DOCUMENT_DB = 'reader-documents';
 const LAST_DOCUMENT_STORE = 'documents';
 const LAST_DOCUMENT_ID = 'last';
 const USER_PREFERENCES_KEY = 'reader:preferences';
-const BRACKET_PAIRS: Array<[string, string]> = [
-  ['[', ']'],
-  ['(', ')'],
-  ['{', '}'],
-  ['<', '>'],
-];
+const DEFAULT_CONVENTIONAL_CHUNK_SIZE = 120;
+const CONVENTIONAL_BUFFER_CHUNKS = 2;
+const DEFAULT_CONVENTIONAL_CHUNK_HEIGHT = 240;
 const LEFT_EYE_LANDMARKS = [33, 160, 158, 133, 153, 144] as const;
 const RIGHT_EYE_LANDMARKS = [362, 385, 387, 263, 373, 380] as const;
-
-const tokenize = (text: string) => {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  if (!normalized) return [];
-  return mergeBracketedTokens(normalized.split(' '));
-};
-
-const hashText = (text: string) => {
-  let hash = 0;
-  for (let i = 0; i < text.length; i += 1) {
-    hash = (hash << 5) - hash + text.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash).toString(36);
-};
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -151,52 +158,46 @@ const getPivotIndex = (word: string) => {
   return clamp(leading + boundedPivot, 0, Math.max(0, word.length - 1));
 };
 
-const buildSnippet = (tokens: string[], activeIndex: number, radius: number) => {
-  const start = clamp(activeIndex - radius, 0, Math.max(0, tokens.length - 1));
-  const end = clamp(activeIndex + radius + 1, 0, tokens.length);
-  return tokens.slice(start, end).map((token, offset) => ({
-    text: token,
-    isActive: start + offset === activeIndex,
-  }));
-};
+const normalizeTokenForSearch = (value: string) =>
+  value.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
 
-const mergeBracketedTokens = (tokens: string[]) => {
-  const merged: string[] = [];
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    let handled = false;
-    for (const [open, close] of BRACKET_PAIRS) {
-      if (token === open) {
-        const next = tokens[i + 1];
-        const nextNext = tokens[i + 2];
-        if (next && nextNext === close) {
-          merged.push(`${open}${next}${close}`);
-          i += 2;
-          handled = true;
-          break;
-        }
-        if (next && next.endsWith(close)) {
-          merged.push(`${open}${next}`);
-          i += 1;
-          handled = true;
-          break;
-        }
-      }
-      if (token.startsWith(open) && token !== open && !token.endsWith(close)) {
-        const next = tokens[i + 1];
-        if (next === close) {
-          merged.push(`${token}${close}`);
-          i += 1;
-          handled = true;
-          break;
-        }
-      }
-    }
-    if (!handled) {
-      merged.push(token);
+const getSegmentIndexForWordIndex = (wordIndex: number, segmentStarts: number[]) => {
+  if (!segmentStarts.length) return 0;
+  let low = 0;
+  let high = segmentStarts.length - 1;
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2);
+    if (segmentStarts[mid] <= wordIndex) {
+      low = mid;
+    } else {
+      high = mid - 1;
     }
   }
-  return merged;
+  return low;
+};
+
+const getConventionalChunkSize = (tokenCount: number) => {
+  if (tokenCount > 60000) return 60;
+  if (tokenCount > 30000) return 80;
+  if (tokenCount > 15000) return 100;
+  return DEFAULT_CONVENTIONAL_CHUNK_SIZE;
+};
+
+const getConventionalBufferChunks = (chunkSize: number) => (chunkSize <= 80 ? 3 : CONVENTIONAL_BUFFER_CHUNKS);
+
+const getSteppedWordIndex = (
+  currentIndex: number,
+  direction: 'back' | 'next',
+  stepSize: number,
+  segmentStarts: number[],
+  segments: Segment[],
+) => {
+  if (!segments.length) return currentIndex;
+  const segmentIndex = getSegmentIndexForWordIndex(currentIndex, segmentStarts);
+  const delta = direction === 'back' ? -stepSize : stepSize;
+  const nextSegmentIndex = clamp(segmentIndex + delta, 0, Math.max(0, segments.length - 1));
+  const nextSegment = segments[nextSegmentIndex];
+  return nextSegment ? nextSegment.startIndex : currentIndex;
 };
 
 const distance = (a: NormalizedLandmark, b: NormalizedLandmark) =>
@@ -241,6 +242,106 @@ const getSentencePauseMs = (word: string, basePauseMs: number) => {
   if (/[;:]["')\]]*$/.test(trimmed)) return minorPause;
   return 0;
 };
+
+type ReaderDisplayProps = {
+  currentSegments: Segment[];
+  currentSegmentText: string;
+  singleWordMode: boolean;
+  contextRadius: number;
+  tokens: string[];
+  wordIndex: number;
+};
+
+const ReaderDisplay = memo(
+  ({ currentSegments, currentSegmentText, singleWordMode, contextRadius, tokens, wordIndex }: ReaderDisplayProps) => {
+    if (!currentSegments.length) {
+      return <span className="display-placeholder">Load a passage to begin.</span>;
+    }
+    if (!singleWordMode) {
+      return <span className="display-chunk">{currentSegmentText}</span>;
+    }
+    const word = currentSegments[0]?.text ?? '';
+    const pivotIndex = getPivotIndex(word);
+    const left = word.slice(0, pivotIndex);
+    const pivot = word[pivotIndex] || '';
+    const right = word.slice(pivotIndex + 1);
+    const showContext = contextRadius > 0;
+    const before = showContext
+      ? tokens.slice(Math.max(0, wordIndex - contextRadius), wordIndex).join(' ')
+      : '';
+    const after = showContext
+      ? tokens.slice(wordIndex + 1, wordIndex + 1 + contextRadius).join(' ')
+      : '';
+    return (
+      <div className={`display-stack${showContext ? ' with-context' : ''}`}>
+        <span className="display-word" aria-live="polite">
+          <span className="word-left">{left}</span>
+          <span className="word-pivot">{pivot}</span>
+          <span className="word-right">{right}</span>
+        </span>
+        {showContext && (
+          <span className="display-context" aria-hidden="true">
+            {before && <span className="context-before">{before} </span>}
+            <span className="context-current">{word}</span>
+            {after && <span className="context-after"> {after}</span>}
+          </span>
+        )}
+      </div>
+    );
+  },
+);
+ReaderDisplay.displayName = 'ReaderDisplay';
+
+type ConventionalExcerptProps = {
+  nodes: React.ReactNode;
+  spacerHeights: { top: number; bottom: number };
+  onScroll: () => void;
+  onClick: (event: React.MouseEvent<HTMLDivElement>) => void;
+};
+
+const ConventionalExcerpt = memo(
+  forwardRef<HTMLDivElement, ConventionalExcerptProps>(({ nodes, spacerHeights, onScroll, onClick }, ref) => (
+    <div className="snippet full" ref={ref} onScroll={onScroll} onClick={onClick}>
+      {spacerHeights.top > 0 && <div className="excerpt-spacer" style={{ height: spacerHeights.top }} />}
+      {nodes}
+      {spacerHeights.bottom > 0 && <div className="excerpt-spacer" style={{ height: spacerHeights.bottom }} />}
+    </div>
+  )),
+);
+ConventionalExcerpt.displayName = 'ConventionalExcerpt';
+
+type ConventionalRenderedProps = {
+  content: React.ReactNode;
+};
+
+const ConventionalRendered = memo(
+  forwardRef<HTMLDivElement, ConventionalRenderedProps>(({ content }, ref) => (
+    <div className="snippet full rendered" ref={ref}>
+      {content}
+    </div>
+  )),
+);
+ConventionalRendered.displayName = 'ConventionalRendered';
+
+type BookmarksPanelProps = {
+  onClear: () => void;
+  bookmarkRows: React.ReactNode;
+  notice: Notice | null;
+};
+
+const BookmarksPanel = memo(({ onClear, bookmarkRows, notice }: BookmarksPanelProps) => (
+  <div className="bookmarks">
+    <div className="bookmarks-header">
+      <h3>Bookmarks</h3>
+      <button type="button" className="ghost" onClick={onClear}>
+        Clear
+      </button>
+    </div>
+    {bookmarkRows ? bookmarkRows : <p className="hint">Save anchor points to return to later.</p>}
+    {notice && <p className={`notice ${notice.kind}`}>{notice.message}</p>}
+  </div>
+));
+BookmarksPanel.displayName = 'BookmarksPanel';
 
 const openLastDocumentDb = () =>
   new Promise<IDBDatabase>((resolve, reject) => {
@@ -330,7 +431,28 @@ const buildRangeText = (
   };
 };
 
-const extractPdfData = async (
+const scheduleIdle = (callback: () => void, timeout = 1200) => {
+  if (typeof window === 'undefined') return null;
+  const idle = (window as any).requestIdleCallback as
+    | ((cb: () => void, options?: { timeout: number }) => number)
+    | undefined;
+  if (typeof idle === 'function') {
+    return idle(() => callback(), { timeout });
+  }
+  return window.setTimeout(callback, Math.min(timeout, 600));
+};
+
+const cancelIdle = (id: number | null) => {
+  if (typeof window === 'undefined' || id === null) return;
+  const cancel = (window as any).cancelIdleCallback as ((handle: number) => void) | undefined;
+  if (typeof cancel === 'function') {
+    cancel(id);
+    return;
+  }
+  window.clearTimeout(id);
+};
+
+const extractPdfDataMainThread = async (
   data: Uint8Array,
   onProgress?: (current: number, total: number) => void,
 ) => {
@@ -401,10 +523,16 @@ const extractPdfData = async (
 function App() {
   const [title, setTitle] = useState('Untitled Session');
   const [sourceText, setSourceText] = useState(DEFAULT_TEXT);
-  const [parallelText, setParallelText] = useState('');
+  const [secondaryText, setSecondaryText] = useState('');
+  const [primaryLanguage, setPrimaryLanguage] = useState('English');
+  const [secondaryLanguage, setSecondaryLanguage] = useState('German');
   const [primaryFileMeta, setPrimaryFileMeta] = useState<FileMeta | null>(null);
+  const [secondaryFileMeta, setSecondaryFileMeta] = useState<FileMeta | null>(null);
   const [wpm, setWpm] = useState(320);
   const [chunkSize, setChunkSize] = useState(1);
+  const [granularity, setGranularity] = useState<Granularity>('word');
+  const [contextRadius, setContextRadius] = useState(0);
+  const [minWordMs, setMinWordMs] = useState(160);
   const [sentencePauseMs, setSentencePauseMs] = useState(200);
   const [sessionElapsedMs, setSessionElapsedMs] = useState(0);
   const [wordIndex, setWordIndex] = useState(0);
@@ -415,13 +543,21 @@ function App() {
     const stored = window.localStorage.getItem(CONVENTIONAL_MODE_KEY);
     return stored === 'excerpt' || stored === 'rendered' ? stored : 'rendered';
   });
-  const [showParallel, setShowParallel] = useState(true);
+  const [conventionalWindow, setConventionalWindow] = useState<{ start: number; end: number }>({
+    start: 0,
+    end: 0,
+  });
+  const [conventionalLayoutVersion, setConventionalLayoutVersion] = useState(0);
+  const [conventionalBufferBoost, setConventionalBufferBoost] = useState(0);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [bookmarkNotice, setBookmarkNotice] = useState<Notice | null>(null);
   const [furthestRead, setFurthestRead] = useState<FurthestRead | null>(null);
   const [sourceKind, setSourceKind] = useState<'text' | 'pdf'>('text');
   const [pdfState, setPdfState] = useState<PdfState | null>(null);
   const [pageRange, setPageRange] = useState<PageRange>({ start: 1, end: 1 });
   const [pageRangeDraft, setPageRangeDraft] = useState<PageRange>({ start: 1, end: 1 });
+  const [jumpPage, setJumpPage] = useState('');
+  const [jumpPercent, setJumpPercent] = useState('');
   const [pageOffsets, setPageOffsets] = useState<number[]>([]);
   const [isPdfBusy, setIsPdfBusy] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(false);
@@ -435,8 +571,9 @@ function App() {
   const [ttsChecking, setTtsChecking] = useState(false);
   const [conventionalSeekEnabled, setConventionalSeekEnabled] = useState(true);
   const [autoFollowConventional, setAutoFollowConventional] = useState(true);
+  const [showBilingual, setShowBilingual] = useState(true);
   const [primaryNotice, setPrimaryNotice] = useState<Notice | null>(null);
-  const [parallelNotice, setParallelNotice] = useState<Notice | null>(null);
+  const [secondaryNotice, setSecondaryNotice] = useState<Notice | null>(null);
   const [cameraEnabled, setCameraEnabled] = useState(false);
   const [cameraHandEnabled, setCameraHandEnabled] = useState(true);
   const [cameraEyeEnabled, setCameraEyeEnabled] = useState(true);
@@ -446,9 +583,73 @@ function App() {
   const [companionLog, setCompanionLog] = useState<string[]>([
     'Hermeneutics companion will live here. Connect to /api/tutor/quick-chat when ready.',
   ]);
+  const [findQuery, setFindQuery] = useState('');
+  const [findCursor, setFindCursor] = useState(0);
+  const [tokens, setTokens] = useState<string[]>([]);
+  const [secondaryTokens, setSecondaryTokens] = useState<string[]>([]);
+  const [segments, setSegments] = useState<Segment[]>([]);
+  const [secondarySegments, setSecondarySegments] = useState<Segment[]>([]);
+  const [findMatches, setFindMatches] = useState<number[]>([]);
+  const [workerReady, setWorkerReady] = useState(false);
+  const [workerNonce, setWorkerNonce] = useState(0);
+  const [workerFallbackNonce, setWorkerFallbackNonce] = useState(0);
+  const [workerNotice, setWorkerNotice] = useState<Notice | null>(null);
+  const [isIndexingPrimary, setIsIndexingPrimary] = useState(false);
+  const [isIndexingSecondary, setIsIndexingSecondary] = useState(false);
+  const [isFinding, setIsFinding] = useState(false);
 
-  const tokens = useMemo(() => tokenize(sourceText), [sourceText]);
-  const parallelTokens = useMemo(() => tokenize(parallelText), [parallelText]);
+  const deferredSourceText = useDeferredValue(sourceText);
+  const deferredSecondaryText = useDeferredValue(secondaryText);
+  const deferredFindQuery = useDeferredValue(findQuery);
+  const renderedSourceText = deferredSourceText;
+  const canUseWorker = typeof Worker !== 'undefined';
+  const renderedMarkdown = useMemo(
+    () => <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderedSourceText}</ReactMarkdown>,
+    [renderedSourceText],
+  );
+  const segmentStartIndices = useMemo(
+    () => segments.map((segment) => segment.startIndex),
+    [segments],
+  );
+  const segmentIndex = useMemo(
+    () => getSegmentIndexForWordIndex(wordIndex, segmentStartIndices),
+    [segmentStartIndices, wordIndex],
+  );
+  const currentSegments = useMemo(
+    () => segments.slice(segmentIndex, segmentIndex + chunkSize),
+    [segments, segmentIndex, chunkSize],
+  );
+  const currentSegmentWordCount = useMemo(
+    () => currentSegments.reduce((sum, segment) => sum + segment.wordCount, 0),
+    [currentSegments],
+  );
+  const currentSegmentText = useMemo(
+    () => currentSegments.map((segment) => segment.text).join(' '),
+    [currentSegments],
+  );
+  const activeSegmentRange = useMemo(() => {
+    if (!currentSegments.length) return null;
+    const start = currentSegments[0].startIndex;
+    const last = currentSegments[currentSegments.length - 1];
+    const end = last.startIndex + Math.max(1, last.wordCount) - 1;
+    return { start, end };
+  }, [currentSegments]);
+  const secondarySegmentIndex = useMemo(() => {
+    if (!secondarySegments.length) return 0;
+    if (!segments.length) return 0;
+    if (granularity === 'sentence') {
+      return clamp(segmentIndex, 0, secondarySegments.length - 1);
+    }
+    const ratio = segmentIndex / Math.max(1, segments.length - 1);
+    return clamp(Math.round(ratio * (secondarySegments.length - 1)), 0, secondarySegments.length - 1);
+  }, [granularity, segmentIndex, segments.length, secondarySegments.length]);
+  const secondarySegmentChunkText = useMemo(() => {
+    if (!secondarySegments.length) return '';
+    const start = secondarySegmentIndex;
+    const end = Math.min(secondarySegments.length, start + chunkSize);
+    return secondarySegments.slice(start, end).map((segment) => segment.text).join(' ');
+  }, [chunkSize, secondarySegmentIndex, secondarySegments]);
+  const bilingualReady = secondaryText.trim().length > 0 && secondarySegments.length > 0;
   const docKey = useMemo(() => {
     if (sourceKind === 'pdf' && primaryFileMeta) {
       return `reader:pdf:${primaryFileMeta.name}:${primaryFileMeta.size}:${primaryFileMeta.lastModified}`;
@@ -461,7 +662,39 @@ function App() {
   }, [primaryFileMeta, sourceKind, sourceText]);
 
   const saveTimerRef = useRef<number | null>(null);
+  const saveIdleRef = useRef<number | null>(null);
+  const pendingBookmarkRef = useRef<BookmarkPayload | null>(null);
+  const pendingBookmarkMismatchRef = useRef(false);
+  const textWorkerRef = useRef<Worker | null>(null);
+  const textWorkerIdRef = useRef(0);
+  const primaryDocIdRef = useRef(0);
+  const secondaryDocIdRef = useRef(0);
+  const primaryDocReadyRef = useRef(false);
+  const secondaryDocReadyRef = useRef(false);
+  const pendingPrimarySegmentRef = useRef(false);
+  const pendingSecondarySegmentRef = useRef(false);
+  const findQueryRef = useRef('');
+  const granularityRef = useRef<Granularity>('word');
+  const workerRestartTimerRef = useRef<number | null>(null);
+  const workerNoticeTimerRef = useRef<number | null>(null);
   const pdfDataRef = useRef<Uint8Array | null>(null);
+  const pdfWorkerRef = useRef<Worker | null>(null);
+  const pdfWorkerCallbacksRef = useRef<
+    Map<
+      number,
+      {
+        resolve: (value: {
+          pageTexts: string[];
+          pageTokenCounts: number[];
+          outline: PdfOutlineItem[];
+          pageCount: number;
+        }) => void;
+        reject: (error: Error) => void;
+        onProgress?: (current: number, total: number) => void;
+      }
+    >
+  >(new Map());
+  const pdfWorkerIdRef = useRef(0);
   const ttsAbortRef = useRef<AbortController | null>(null);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsAudioUrlRef = useRef<string | null>(null);
@@ -475,12 +708,22 @@ function App() {
     chunkWords: 26,
   });
   const tokensRef = useRef<string[]>([]);
+  const segmentsRef = useRef<Segment[]>([]);
+  const segmentStartIndicesRef = useRef<number[]>([]);
   const conventionalRef = useRef<HTMLDivElement | null>(null);
+  const conventionalChunkHeightsRef = useRef<number[]>([]);
+  const conventionalAvgChunkHeightRef = useRef(DEFAULT_CONVENTIONAL_CHUNK_HEIGHT);
+  const pendingConventionalScrollRef = useRef<{ index: number; behavior: ScrollBehavior } | null>(null);
   const scrollRafRef = useRef<number | null>(null);
   const scrollLockRef = useRef(false);
   const scrollEndTimeoutRef = useRef<number | null>(null);
   const autoFollowRafRef = useRef<number | null>(null);
-  const prevActiveWordRef = useRef<number | null>(null);
+  const lastConventionalScrollTopRef = useRef(0);
+  const lastConventionalScrollAtRef = useRef(0);
+  const conventionalScrollDirectionRef = useRef(1);
+  const conventionalBoostTimeoutRef = useRef<number | null>(null);
+  const conventionalBufferBoostRef = useRef(0);
+  const prevActiveRangeRef = useRef<{ start: number; end: number } | null>(null);
   const isPlayingRef = useRef(false);
   const conventionalSeekEnabledRef = useRef(true);
   const wordIndexRef = useRef(0);
@@ -490,7 +733,9 @@ function App() {
   const cameraRafRef = useRef<number | null>(null);
   const handLandmarkerRef = useRef<any>(null);
   const faceLandmarkerRef = useRef<any>(null);
-  const handleSeekRef = useRef<(index: number, options?: { pause?: boolean }) => void>(() => {});
+  const handleSeekRef = useRef<
+    (index: number, options?: { pause?: boolean; focusConventional?: boolean; scrollBehavior?: ScrollBehavior }) => void
+  >(() => {});
   const handHistoryRef = useRef<Array<{ x: number; t: number }>>([]);
   const blinkStartRef = useRef<number | null>(null);
   const blinkLockedRef = useRef(false);
@@ -502,8 +747,10 @@ function App() {
   const sessionAccumulatedRef = useRef(0);
   const postPauseDelayRef = useRef(0);
   const lastDocSaveTimerRef = useRef<number | null>(null);
+  const lastDocIdleRef = useRef<number | null>(null);
   const didHydrateRef = useRef(false);
   const prefsSaveTimerRef = useRef<number | null>(null);
+  const prefsIdleRef = useRef<number | null>(null);
   const didPrefHydrateRef = useRef(false);
 
   useEffect(() => {
@@ -531,6 +778,20 @@ function App() {
   }, [chunkSize]);
 
   useEffect(() => {
+    conventionalBufferBoostRef.current = conventionalBufferBoost;
+  }, [conventionalBufferBoost]);
+
+  useEffect(() => {
+    granularityRef.current = granularity;
+  }, [granularity]);
+
+  useEffect(() => {
+    if (granularity === 'sentence' && chunkSize !== 1) {
+      setChunkSize(1);
+    }
+  }, [chunkSize, granularity]);
+
+  useEffect(() => {
     cameraHandEnabledRef.current = cameraHandEnabled;
   }, [cameraHandEnabled]);
 
@@ -549,8 +810,353 @@ function App() {
 
   useEffect(() => {
     tokensRef.current = tokens;
-    prevActiveWordRef.current = null;
-  }, [tokens]);
+    segmentsRef.current = segments;
+    segmentStartIndicesRef.current = segmentStartIndices;
+    prevActiveRangeRef.current = null;
+  }, [granularity, segmentStartIndices, segments, tokens]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const encoded = readBookmarkParam(window.location.href);
+    if (!encoded) return;
+    const payload = parseBookmarkValue(encoded);
+    if (!payload) return;
+    pendingBookmarkRef.current = payload;
+  }, []);
+
+  useEffect(() => {
+    findQueryRef.current = deferredFindQuery;
+  }, [deferredFindQuery]);
+
+  useEffect(() => {
+    if (workerReady && workerNotice) {
+      setWorkerNotice(null);
+    }
+  }, [workerNotice, workerReady]);
+
+  useEffect(() => {
+    return () => {
+      if (workerRestartTimerRef.current) {
+        window.clearTimeout(workerRestartTimerRef.current);
+      }
+      if (workerNoticeTimerRef.current) {
+        window.clearTimeout(workerNoticeTimerRef.current);
+      }
+      if (conventionalBoostTimeoutRef.current) {
+        window.clearTimeout(conventionalBoostTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!canUseWorker) return;
+    const worker = new Worker(new URL('./textWorker.ts', import.meta.url), { type: 'module' });
+    textWorkerRef.current = worker;
+    setWorkerReady(true);
+
+    const handleMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string };
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'analyze-result') {
+        const payload = data as {
+          docId: number;
+          kind: 'primary' | 'secondary';
+          tokens: string[];
+          segments: Segment[];
+        };
+        if (payload.kind === 'primary') {
+          if (payload.docId !== primaryDocIdRef.current) return;
+          primaryDocReadyRef.current = true;
+          setIsIndexingPrimary(false);
+          setTokens(payload.tokens);
+          if (pendingPrimarySegmentRef.current) {
+            pendingPrimarySegmentRef.current = false;
+            const requestId = ++textWorkerIdRef.current;
+            setIsIndexingPrimary(true);
+            worker.postMessage({
+              type: 'segment',
+              id: requestId,
+              docId: payload.docId,
+              kind: 'primary',
+              granularity: granularityRef.current,
+            });
+          } else {
+            setSegments(payload.segments);
+          }
+        } else {
+          if (payload.docId !== secondaryDocIdRef.current) return;
+          secondaryDocReadyRef.current = true;
+          setIsIndexingSecondary(false);
+          setSecondaryTokens(payload.tokens);
+          if (pendingSecondarySegmentRef.current) {
+            pendingSecondarySegmentRef.current = false;
+            const requestId = ++textWorkerIdRef.current;
+            setIsIndexingSecondary(true);
+            worker.postMessage({
+              type: 'segment',
+              id: requestId,
+              docId: payload.docId,
+              kind: 'secondary',
+              granularity: granularityRef.current,
+            });
+          } else {
+            setSecondarySegments(payload.segments);
+          }
+        }
+        return;
+      }
+      if (data.type === 'segment-result') {
+        const payload = data as {
+          docId: number;
+          kind: 'primary' | 'secondary';
+          segments: Segment[];
+        };
+        if (payload.kind === 'primary') {
+          if (payload.docId !== primaryDocIdRef.current) return;
+          setIsIndexingPrimary(false);
+          setSegments(payload.segments);
+        } else {
+          if (payload.docId !== secondaryDocIdRef.current) return;
+          setIsIndexingSecondary(false);
+          setSecondarySegments(payload.segments);
+        }
+        return;
+      }
+      if (data.type === 'find-result') {
+        const payload = data as { docId: number; query: string; matches: number[] };
+        if (payload.docId !== primaryDocIdRef.current) return;
+        if (payload.query !== findQueryRef.current) return;
+        setIsFinding(false);
+        setFindMatches(payload.matches);
+      }
+    };
+
+    const handleWorkerError = () => {
+      if (workerNoticeTimerRef.current) {
+        window.clearTimeout(workerNoticeTimerRef.current);
+      }
+      setWorkerNotice({ kind: 'info', message: 'Background indexing paused. Retrying shortly.' });
+      setWorkerReady(false);
+      setWorkerFallbackNonce((value) => value + 1);
+      if (workerRestartTimerRef.current) {
+        window.clearTimeout(workerRestartTimerRef.current);
+      }
+      workerRestartTimerRef.current = window.setTimeout(() => {
+        setWorkerNonce((value) => value + 1);
+      }, 600);
+      workerNoticeTimerRef.current = window.setTimeout(() => {
+        setWorkerNotice(null);
+      }, 4000);
+      worker.terminate();
+      if (textWorkerRef.current === worker) {
+        textWorkerRef.current = null;
+      }
+    };
+
+    worker.addEventListener('message', handleMessage);
+    worker.addEventListener('error', handleWorkerError);
+    worker.addEventListener('messageerror', handleWorkerError);
+    return () => {
+      worker.removeEventListener('message', handleMessage);
+      worker.removeEventListener('error', handleWorkerError);
+      worker.removeEventListener('messageerror', handleWorkerError);
+      worker.terminate();
+      if (textWorkerRef.current === worker) {
+        textWorkerRef.current = null;
+      }
+      setWorkerReady(false);
+    };
+  }, [canUseWorker, workerNonce]);
+
+  useEffect(() => {
+    setFindCursor((prev) => {
+      if (!findMatches.length) return 0;
+      return prev >= findMatches.length ? 0 : prev;
+    });
+  }, [deferredFindQuery, findMatches.length]);
+
+  useEffect(() => {
+    primaryDocReadyRef.current = false;
+    pendingPrimarySegmentRef.current = false;
+    primaryDocIdRef.current += 1;
+  }, [deferredSourceText]);
+
+  useEffect(() => {
+    secondaryDocReadyRef.current = false;
+    pendingSecondarySegmentRef.current = false;
+    secondaryDocIdRef.current += 1;
+  }, [deferredSecondaryText]);
+
+  useEffect(() => {
+    const docId = primaryDocIdRef.current;
+    if (!deferredSourceText.trim()) {
+      setIsIndexingPrimary(false);
+      setTokens([]);
+      setSegments([]);
+      setFindMatches([]);
+      return;
+    }
+    if (!canUseWorker || !workerReady || !textWorkerRef.current) {
+      setIsIndexingPrimary(true);
+      const nextTokens = tokenize(deferredSourceText);
+      setTokens(nextTokens);
+      const nextSegments =
+        granularityRef.current === 'sentence'
+          ? segmentTextBySentence(deferredSourceText)
+          : segmentTokens(nextTokens, granularityRef.current);
+      setSegments(nextSegments);
+      setIsIndexingPrimary(false);
+      return;
+    }
+    setIsIndexingPrimary(true);
+    const requestId = ++textWorkerIdRef.current;
+    textWorkerRef.current.postMessage({
+      type: 'analyze',
+      id: requestId,
+      docId,
+      kind: 'primary',
+      text: deferredSourceText,
+      granularity: granularityRef.current,
+    });
+  }, [canUseWorker, deferredSourceText, workerFallbackNonce, workerReady]);
+
+  useEffect(() => {
+    const docId = secondaryDocIdRef.current;
+    if (!deferredSecondaryText.trim()) {
+      setIsIndexingSecondary(false);
+      setSecondaryTokens([]);
+      setSecondarySegments([]);
+      return;
+    }
+    if (!canUseWorker || !workerReady || !textWorkerRef.current) {
+      setIsIndexingSecondary(true);
+      const nextTokens = tokenize(deferredSecondaryText);
+      setSecondaryTokens(nextTokens);
+      const nextSegments =
+        granularityRef.current === 'sentence'
+          ? segmentTextBySentence(deferredSecondaryText)
+          : segmentTokens(nextTokens, granularityRef.current);
+      setSecondarySegments(nextSegments);
+      setIsIndexingSecondary(false);
+      return;
+    }
+    setIsIndexingSecondary(true);
+    const requestId = ++textWorkerIdRef.current;
+    textWorkerRef.current.postMessage({
+      type: 'analyze',
+      id: requestId,
+      docId,
+      kind: 'secondary',
+      text: deferredSecondaryText,
+      granularity: granularityRef.current,
+    });
+  }, [canUseWorker, deferredSecondaryText, workerFallbackNonce, workerReady]);
+
+  useEffect(() => {
+    if (!deferredSourceText.trim()) {
+      setSegments([]);
+      return;
+    }
+    if (canUseWorker && workerReady && textWorkerRef.current) {
+      if (primaryDocReadyRef.current) {
+        const requestId = ++textWorkerIdRef.current;
+        setIsIndexingPrimary(true);
+        textWorkerRef.current.postMessage({
+          type: 'segment',
+          id: requestId,
+          docId: primaryDocIdRef.current,
+          kind: 'primary',
+          granularity,
+        });
+        return;
+      }
+      pendingPrimarySegmentRef.current = true;
+    }
+    if (!tokens.length) return;
+    setIsIndexingPrimary(true);
+    const nextSegments =
+      granularity === 'sentence'
+        ? segmentTextBySentence(deferredSourceText)
+        : segmentTokens(tokens, granularity);
+    setSegments(nextSegments);
+    setIsIndexingPrimary(false);
+  }, [canUseWorker, deferredSourceText, granularity, tokens, workerReady]);
+
+  useEffect(() => {
+    if (!deferredSecondaryText.trim()) {
+      setSecondarySegments([]);
+      return;
+    }
+    if (canUseWorker && workerReady && textWorkerRef.current) {
+      if (secondaryDocReadyRef.current) {
+        const requestId = ++textWorkerIdRef.current;
+        setIsIndexingSecondary(true);
+        textWorkerRef.current.postMessage({
+          type: 'segment',
+          id: requestId,
+          docId: secondaryDocIdRef.current,
+          kind: 'secondary',
+          granularity,
+        });
+        return;
+      }
+      pendingSecondarySegmentRef.current = true;
+    }
+    if (!secondaryTokens.length) return;
+    setIsIndexingSecondary(true);
+    const nextSegments =
+      granularity === 'sentence'
+        ? segmentTextBySentence(deferredSecondaryText)
+        : segmentTokens(secondaryTokens, granularity);
+    setSecondarySegments(nextSegments);
+    setIsIndexingSecondary(false);
+  }, [canUseWorker, deferredSecondaryText, granularity, secondaryTokens, workerReady]);
+
+  useEffect(() => {
+    if (!deferredFindQuery.trim() || !tokens.length) {
+      setIsFinding(false);
+      setFindMatches([]);
+      return;
+    }
+    if (canUseWorker && workerReady && textWorkerRef.current && primaryDocReadyRef.current) {
+      setIsFinding(true);
+      const requestId = ++textWorkerIdRef.current;
+      textWorkerRef.current.postMessage({
+        type: 'find',
+        id: requestId,
+        docId: primaryDocIdRef.current,
+        query: deferredFindQuery,
+      });
+      return;
+    }
+    setIsFinding(true);
+    const queryTokens = tokenize(deferredFindQuery)
+      .map((token) => normalizeTokenForSearch(token))
+      .filter(Boolean);
+    const searchTokens = tokens.map((token) => normalizeTokenForSearch(token));
+    if (!queryTokens.length || !searchTokens.length) {
+      setIsFinding(false);
+      setFindMatches([]);
+      return;
+    }
+    const matches: number[] = [];
+    const maxStart = searchTokens.length - queryTokens.length;
+    for (let i = 0; i <= maxStart; i += 1) {
+      let isMatch = true;
+      for (let j = 0; j < queryTokens.length; j += 1) {
+        const token = searchTokens[i + j];
+        if (!token || !token.includes(queryTokens[j])) {
+          isMatch = false;
+          break;
+        }
+      }
+      if (isMatch) {
+        matches.push(i);
+      }
+    }
+    setFindMatches(matches);
+    setIsFinding(false);
+  }, [canUseWorker, deferredFindQuery, tokens.length, workerReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -572,8 +1178,8 @@ function App() {
       if (typeof parsed.sourceText === 'string') {
         setSourceText(parsed.sourceText);
       }
-      if (typeof parsed.parallelText === 'string') {
-        setParallelText(parsed.parallelText);
+      if (typeof parsed.secondaryText === 'string') {
+        setSecondaryText(parsed.secondaryText);
       }
       if (typeof parsed.title === 'string' && parsed.title.trim()) {
         setTitle(parsed.title);
@@ -588,6 +1194,20 @@ function App() {
         typeof parsed.primaryFileMeta.lastModified === 'number'
       ) {
         setPrimaryFileMeta(parsed.primaryFileMeta);
+      }
+      if (
+        parsed.secondaryFileMeta &&
+        typeof parsed.secondaryFileMeta.name === 'string' &&
+        typeof parsed.secondaryFileMeta.size === 'number' &&
+        typeof parsed.secondaryFileMeta.lastModified === 'number'
+      ) {
+        setSecondaryFileMeta(parsed.secondaryFileMeta);
+      }
+      if (typeof parsed.primaryLanguage === 'string' && parsed.primaryLanguage.trim()) {
+        setPrimaryLanguage(parsed.primaryLanguage);
+      }
+      if (typeof parsed.secondaryLanguage === 'string' && parsed.secondaryLanguage.trim()) {
+        setSecondaryLanguage(parsed.secondaryLanguage);
       }
     };
     hydrate()
@@ -616,14 +1236,14 @@ function App() {
       if (typeof parsed.showConventional === 'boolean') {
         setShowConventional(parsed.showConventional);
       }
-      if (typeof parsed.showParallel === 'boolean') {
-        setShowParallel(parsed.showParallel);
-      }
       if (typeof parsed.conventionalSeekEnabled === 'boolean') {
         setConventionalSeekEnabled(parsed.conventionalSeekEnabled);
       }
       if (typeof parsed.autoFollowConventional === 'boolean') {
         setAutoFollowConventional(parsed.autoFollowConventional);
+      }
+      if (typeof parsed.showBilingual === 'boolean') {
+        setShowBilingual(parsed.showBilingual);
       }
       if (typeof parsed.cameraEnabled === 'boolean') {
         setCameraEnabled(parsed.cameraEnabled);
@@ -650,26 +1270,36 @@ function App() {
     if (prefsSaveTimerRef.current) {
       window.clearTimeout(prefsSaveTimerRef.current);
     }
+    if (prefsIdleRef.current) {
+      cancelIdle(prefsIdleRef.current);
+      prefsIdleRef.current = null;
+    }
     prefsSaveTimerRef.current = window.setTimeout(() => {
-      const payload: UserPreferences = {
-        showConventional,
-        showParallel,
-        conventionalSeekEnabled,
-        autoFollowConventional,
-        cameraEnabled,
-        cameraHandEnabled,
-        cameraEyeEnabled,
-        cameraPreview,
-      };
-      try {
-        window.localStorage.setItem(USER_PREFERENCES_KEY, JSON.stringify(payload));
-      } catch (error) {
-        console.warn('Failed to persist user preferences.', error);
-      }
+      prefsIdleRef.current = scheduleIdle(() => {
+        const payload: UserPreferences = {
+          showConventional,
+          conventionalSeekEnabled,
+          autoFollowConventional,
+          showBilingual,
+          cameraEnabled,
+          cameraHandEnabled,
+          cameraEyeEnabled,
+          cameraPreview,
+        };
+        try {
+          window.localStorage.setItem(USER_PREFERENCES_KEY, JSON.stringify(payload));
+        } catch (error) {
+          console.warn('Failed to persist user preferences.', error);
+        }
+      }, 1200);
     }, 250);
     return () => {
       if (prefsSaveTimerRef.current) {
         window.clearTimeout(prefsSaveTimerRef.current);
+      }
+      if (prefsIdleRef.current) {
+        cancelIdle(prefsIdleRef.current);
+        prefsIdleRef.current = null;
       }
     };
   }, [
@@ -680,7 +1310,7 @@ function App() {
     cameraPreview,
     conventionalSeekEnabled,
     showConventional,
-    showParallel,
+    showBilingual,
   ]);
 
   useEffect(() => {
@@ -689,36 +1319,49 @@ function App() {
     if (lastDocSaveTimerRef.current) {
       window.clearTimeout(lastDocSaveTimerRef.current);
     }
+    if (lastDocIdleRef.current) {
+      cancelIdle(lastDocIdleRef.current);
+      lastDocIdleRef.current = null;
+    }
     lastDocSaveTimerRef.current = window.setTimeout(() => {
-      const payload: LastDocument = {
-        sourceText,
-        parallelText,
-        title,
-        sourceKind,
-        primaryFileMeta,
-      };
-      let storedLocally = false;
-      try {
-        window.localStorage.setItem(LAST_DOCUMENT_KEY, JSON.stringify(payload));
-        storedLocally = true;
-      } catch (error) {
-        console.warn('Failed to persist last document snapshot.', error);
+      lastDocIdleRef.current = scheduleIdle(() => {
+        const payload: LastDocument = {
+          sourceText,
+          secondaryText,
+          title,
+          sourceKind,
+          primaryFileMeta,
+          secondaryFileMeta,
+          primaryLanguage,
+          secondaryLanguage,
+        };
+        let storedLocally = false;
         try {
-          window.localStorage.removeItem(LAST_DOCUMENT_KEY);
-        } catch {
-          // Ignore storage cleanup errors.
+          window.localStorage.setItem(LAST_DOCUMENT_KEY, JSON.stringify(payload));
+          storedLocally = true;
+        } catch (error) {
+          console.warn('Failed to persist last document snapshot.', error);
+          try {
+            window.localStorage.removeItem(LAST_DOCUMENT_KEY);
+          } catch {
+            // Ignore storage cleanup errors.
+          }
         }
-      }
-      if (!storedLocally) {
-        void writeLastDocumentToDb(payload);
-      }
+        if (!storedLocally) {
+          void writeLastDocumentToDb(payload);
+        }
+      }, 1500);
     }, 400);
     return () => {
       if (lastDocSaveTimerRef.current) {
         window.clearTimeout(lastDocSaveTimerRef.current);
       }
+      if (lastDocIdleRef.current) {
+        cancelIdle(lastDocIdleRef.current);
+        lastDocIdleRef.current = null;
+      }
     };
-  }, [parallelText, primaryFileMeta, sourceKind, sourceText, title]);
+  }, [primaryFileMeta, primaryLanguage, secondaryFileMeta, secondaryLanguage, sourceKind, secondaryText, sourceText, title]);
 
   useEffect(() => {
     if (!cameraEnabled) {
@@ -788,8 +1431,15 @@ function App() {
 
     const triggerSeek = (direction: 'back' | 'forward') => {
       if (!tokensRef.current.length) return;
-      const delta = direction === 'back' ? -chunkSizeRef.current : chunkSizeRef.current;
-      handleSeekRef.current(wordIndexRef.current + delta);
+      const step = chunkSizeRef.current;
+      const nextWordIndex = getSteppedWordIndex(
+        wordIndexRef.current,
+        direction === 'back' ? 'back' : 'next',
+        step,
+        segmentStartIndicesRef.current,
+        segmentsRef.current,
+      );
+      handleSeekRef.current(nextWordIndex);
     };
 
     const triggerPauseToggle = () => {
@@ -976,22 +1626,36 @@ function App() {
     if (!showConventional || conventionalMode !== 'excerpt') return;
     const container = conventionalRef.current;
     if (!container) return;
-    const prevIndex = prevActiveWordRef.current;
-    if (prevIndex !== null) {
-      const prevEl = container.querySelector(`[data-word-index="${prevIndex}"]`) as HTMLElement | null;
-      prevEl?.classList.remove('is-active');
+    const maxIndex = Math.max(0, tokens.length - 1);
+    const prevRange = prevActiveRangeRef.current;
+    if (prevRange) {
+      const start = clamp(prevRange.start, 0, maxIndex);
+      const end = clamp(prevRange.end, 0, maxIndex);
+      for (let i = start; i <= end; i += 1) {
+        const prevEl = container.querySelector(`[data-word-index="${i}"]`) as HTMLElement | null;
+        prevEl?.classList.remove('is-active');
+      }
     }
-    const nextEl = container.querySelector(`[data-word-index="${wordIndex}"]`) as HTMLElement | null;
-    nextEl?.classList.add('is-active');
-    prevActiveWordRef.current = wordIndex;
-  }, [conventionalMode, wordIndex, showConventional, tokens.length]);
+    if (activeSegmentRange) {
+      const start = clamp(activeSegmentRange.start, 0, maxIndex);
+      const end = clamp(activeSegmentRange.end, 0, maxIndex);
+      for (let i = start; i <= end; i += 1) {
+        const nextEl = container.querySelector(`[data-word-index="${i}"]`) as HTMLElement | null;
+        nextEl?.classList.add('is-active');
+      }
+    }
+    prevActiveRangeRef.current = activeSegmentRange;
+  }, [activeSegmentRange, conventionalMode, conventionalWindow, showConventional, tokens.length]);
 
   useEffect(() => {
     if (!autoFollowConventional || !showConventional || !isPlaying || conventionalMode !== 'excerpt') return;
     const container = conventionalRef.current;
     if (!container) return;
     const activeWord = container.querySelector(`[data-word-index="${wordIndex}"]`) as HTMLElement | null;
-    if (!activeWord) return;
+    if (!activeWord) {
+      scrollConventionalToIndex(wordIndex, 'auto');
+      return;
+    }
     if (autoFollowRafRef.current) return;
     autoFollowRafRef.current = window.requestAnimationFrame(() => {
       autoFollowRafRef.current = null;
@@ -1031,6 +1695,22 @@ function App() {
       setWordIndex(clamp(parsed.index ?? 0, 0, Math.max(0, tokens.length - 1)));
       setWpm(parsed.wpm ?? 320);
       setChunkSize(parsed.chunkSize ?? 1);
+      if (
+        parsed.granularity === 'word' ||
+        parsed.granularity === 'bigram' ||
+        parsed.granularity === 'trigram' ||
+        parsed.granularity === 'sentence'
+      ) {
+        setGranularity(parsed.granularity);
+      } else {
+        setGranularity('word');
+      }
+      setContextRadius(
+        typeof parsed.contextRadius === 'number' ? clamp(parsed.contextRadius, 0, 6) : 0,
+      );
+      setMinWordMs(
+        typeof parsed.minWordMs === 'number' ? clamp(parsed.minWordMs, 80, 400) : 160,
+      );
       setSentencePauseMs(
         typeof parsed.sentencePauseMs === 'number' ? Math.max(0, parsed.sentencePauseMs) : 200,
       );
@@ -1055,26 +1735,52 @@ function App() {
     if (saveTimerRef.current) {
       window.clearTimeout(saveTimerRef.current);
     }
+    if (saveIdleRef.current) {
+      cancelIdle(saveIdleRef.current);
+      saveIdleRef.current = null;
+    }
     saveTimerRef.current = window.setTimeout(() => {
+      saveIdleRef.current = scheduleIdle(() => {
       const payload: SavedSession = {
         index: wordIndex,
         wpm,
         chunkSize,
+        granularity,
+        contextRadius,
+        minWordMs,
         sentencePauseMs,
         sessionElapsedMs,
         title,
-        bookmarks,
-        furthestRead,
-        updatedAt: Date.now(),
-      };
-      localStorage.setItem(docKey, JSON.stringify(payload));
+          bookmarks,
+          furthestRead,
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(docKey, JSON.stringify(payload));
+      }, 1500);
     }, 300);
     return () => {
       if (saveTimerRef.current) {
         window.clearTimeout(saveTimerRef.current);
       }
+      if (saveIdleRef.current) {
+        cancelIdle(saveIdleRef.current);
+        saveIdleRef.current = null;
+      }
     };
-  }, [docKey, wordIndex, wpm, chunkSize, sentencePauseMs, sessionElapsedMs, title, bookmarks, furthestRead]);
+  }, [
+    docKey,
+    wordIndex,
+    wpm,
+    chunkSize,
+    granularity,
+    contextRadius,
+    minWordMs,
+    sentencePauseMs,
+    sessionElapsedMs,
+    title,
+    bookmarks,
+    furthestRead,
+  ]);
 
   useEffect(() => {
     if (!tokens.length) {
@@ -1086,52 +1792,249 @@ function App() {
   }, [tokens.length]);
 
   useEffect(() => {
+    if (granularity === 'word') return;
+    const current = segments[segmentIndex];
+    if (current && wordIndex !== current.startIndex) {
+      setWordIndex(current.startIndex);
+    }
+  }, [granularity, segmentIndex, segments, wordIndex]);
+
+  useEffect(() => {
     if (!isPlaying) {
       postPauseDelayRef.current = 0;
     }
   }, [isPlaying]);
 
   useEffect(() => {
-    if (!isPlaying || tokens.length === 0 || ttsEnabled) return;
-    const intervalMs = Math.max(80, (60000 / Math.max(60, wpm)) * chunkSize);
-    const lastIndex = Math.min(wordIndex + chunkSize - 1, Math.max(0, tokens.length - 1));
+    if (!isPlaying || segments.length === 0 || ttsEnabled) return;
+    const wordsInChunk = Math.max(1, currentSegmentWordCount || 1);
+    const baseIntervalMs = (60000 / Math.max(60, wpm)) * wordsInChunk;
+    const minIntervalMs = Math.max(baseIntervalMs, minWordMs * wordsInChunk);
+    const intervalMs = Math.max(80, minIntervalMs);
     const resumeDelayMs = postPauseDelayRef.current;
-    const pauseMs = getSentencePauseMs(tokens[lastIndex] || '', sentencePauseMs);
+    const lastSegmentText = currentSegments[currentSegments.length - 1]?.text ?? '';
+    const pauseMs = getSentencePauseMs(lastSegmentText, sentencePauseMs);
     postPauseDelayRef.current = pauseMs > 0 ? Math.round(Math.min(160, pauseMs * 0.5)) : 0;
     const timerId = window.setTimeout(() => {
       setWordIndex((prev) => {
-        const next = prev + chunkSize;
-        if (next >= tokens.length) {
+        const currentSegmentIndex = getSegmentIndexForWordIndex(prev, segmentStartIndices);
+        const nextSegmentIndex = currentSegmentIndex + chunkSize;
+        if (nextSegmentIndex >= segments.length) {
           setIsPlaying(false);
           return prev;
         }
-        return next;
+        const nextSegment = segments[nextSegmentIndex];
+        return nextSegment ? nextSegment.startIndex : prev;
       });
     }, intervalMs + pauseMs + resumeDelayMs);
     return () => window.clearTimeout(timerId);
-  }, [chunkSize, isPlaying, sentencePauseMs, tokens, tokens.length, ttsEnabled, wordIndex, wpm]);
+  }, [
+    chunkSize,
+    currentSegmentWordCount,
+    currentSegments,
+    isPlaying,
+    minWordMs,
+    segmentStartIndices,
+    segments,
+    sentencePauseMs,
+    ttsEnabled,
+    wpm,
+  ]);
 
-  const currentChunk = tokens.slice(wordIndex, wordIndex + chunkSize);
   const conventionalTokens = useMemo(() => tokens, [tokens]);
+  const conventionalChunkSize = useMemo(
+    () => getConventionalChunkSize(conventionalTokens.length),
+    [conventionalTokens.length],
+  );
+  const conventionalBufferChunks = useMemo(
+    () => getConventionalBufferChunks(conventionalChunkSize),
+    [conventionalChunkSize],
+  );
+  const effectiveConventionalBuffer = useMemo(
+    () => Math.max(1, conventionalBufferChunks + conventionalBufferBoost),
+    [conventionalBufferBoost, conventionalBufferChunks],
+  );
+  const conventionalChunkCount = useMemo(
+    () => Math.ceil(conventionalTokens.length / conventionalChunkSize),
+    [conventionalChunkSize, conventionalTokens.length],
+  );
+  const getConventionalChunkHeight = (index: number) =>
+    conventionalChunkHeightsRef.current[index] ?? conventionalAvgChunkHeightRef.current;
+  const conventionalOffsets = useMemo(() => {
+    if (conventionalChunkCount === 0) return [0];
+    const offsets = new Array(conventionalChunkCount + 1);
+    offsets[0] = 0;
+    for (let i = 0; i < conventionalChunkCount; i += 1) {
+      offsets[i + 1] = offsets[i] + getConventionalChunkHeight(i);
+    }
+    return offsets;
+  }, [conventionalChunkCount, conventionalLayoutVersion]);
+  const conventionalSpacerHeights = useMemo(() => {
+    if (conventionalMode !== 'excerpt' || conventionalChunkCount === 0) {
+      return { top: 0, bottom: 0 };
+    }
+    const startIndex = clamp(conventionalWindow.start, 0, Math.max(0, conventionalChunkCount - 1));
+    const endIndex = clamp(
+      conventionalWindow.end,
+      startIndex,
+      Math.max(startIndex, conventionalChunkCount - 1),
+    );
+    const total = conventionalOffsets[conventionalOffsets.length - 1] ?? 0;
+    const startOffset = conventionalOffsets[startIndex] ?? 0;
+    const endOffset = conventionalOffsets[Math.min(endIndex + 1, conventionalOffsets.length - 1)] ?? total;
+    return {
+      top: startOffset,
+      bottom: Math.max(0, total - endOffset),
+    };
+  }, [conventionalChunkCount, conventionalMode, conventionalOffsets, conventionalWindow.end, conventionalWindow.start]);
+  const registerConventionalChunk = useCallback((chunkIndex: number) => (node: HTMLDivElement | null) => {
+    if (!node) return;
+    const height = node.getBoundingClientRect().height;
+    if (!height) return;
+    const prev = conventionalChunkHeightsRef.current[chunkIndex];
+    if (prev && Math.abs(prev - height) < 1) return;
+    conventionalChunkHeightsRef.current[chunkIndex] = height;
+    const measured = conventionalChunkHeightsRef.current.filter(
+      (value): value is number => typeof value === 'number' && !Number.isNaN(value),
+    );
+    if (measured.length > 0) {
+      conventionalAvgChunkHeightRef.current = measured.reduce((sum, value) => sum + value, 0) / measured.length;
+    }
+    setConventionalLayoutVersion((value) => value + 1);
+  }, []);
   const conventionalNodes = useMemo(() => {
     if (conventionalMode !== 'excerpt') return null;
-    return conventionalTokens.map((token, index) => (
-      <span
-        key={`${index}-${token}`}
-        data-word-index={index}
-        className="word"
-      >
-        {token}{' '}
-      </span>
-    ));
-  }, [conventionalMode, conventionalTokens]);
-  const parallelIndex = tokens.length
-    ? Math.min(parallelTokens.length - 1, Math.round((wordIndex / tokens.length) * parallelTokens.length))
-    : 0;
-  const parallelSnippet = useMemo(
-    () => buildSnippet(parallelTokens, Math.max(0, parallelIndex), 40),
-    [parallelTokens, parallelIndex],
+    if (conventionalChunkCount === 0) return null;
+    const startChunk = clamp(conventionalWindow.start, 0, Math.max(0, conventionalChunkCount - 1));
+    const endChunk = clamp(
+      conventionalWindow.end,
+      startChunk,
+      Math.max(startChunk, conventionalChunkCount - 1),
+    );
+    const nodes = [];
+    for (let chunkIndex = startChunk; chunkIndex <= endChunk; chunkIndex += 1) {
+      const start = chunkIndex * conventionalChunkSize;
+      const end = Math.min(start + conventionalChunkSize, conventionalTokens.length);
+      const slice = conventionalTokens.slice(start, end);
+      nodes.push(
+        <div
+          key={`chunk-${chunkIndex}`}
+          className="excerpt-chunk"
+          ref={registerConventionalChunk(chunkIndex)}
+          data-chunk-index={chunkIndex}
+        >
+          {slice.map((token, offset) => {
+            const wordIndex = start + offset;
+            return (
+              <span key={`${wordIndex}-${token}`} data-word-index={wordIndex} className="word">
+                {token}{' '}
+              </span>
+            );
+          })}
+        </div>,
+      );
+    }
+    return nodes;
+  }, [
+    conventionalChunkCount,
+    conventionalChunkSize,
+    conventionalMode,
+    conventionalTokens,
+    conventionalWindow,
+    registerConventionalChunk,
+  ]);
+  const updateConventionalWindowForChunk = useCallback(
+    (chunkIndex: number) => {
+      if (conventionalMode !== 'excerpt') return;
+      if (conventionalChunkCount === 0) return;
+      setConventionalWindow((prev) => {
+        const maxIndex = Math.max(0, conventionalChunkCount - 1);
+        const nextStart = clamp(chunkIndex - effectiveConventionalBuffer, 0, maxIndex);
+        const nextEnd = clamp(chunkIndex + effectiveConventionalBuffer, 0, maxIndex);
+        if (prev.start === nextStart && prev.end === nextEnd) return prev;
+        if (chunkIndex >= prev.start + 1 && chunkIndex <= prev.end - 1) return prev;
+        return { start: nextStart, end: nextEnd };
+      });
+    },
+    [conventionalChunkCount, conventionalMode, effectiveConventionalBuffer],
   );
+  const ensureConventionalWindowForIndex = useCallback(
+    (targetIndex: number) => {
+      const chunkIndex = Math.floor(targetIndex / conventionalChunkSize);
+      updateConventionalWindowForChunk(chunkIndex);
+    },
+    [conventionalChunkSize, updateConventionalWindowForChunk],
+  );
+  const findChunkIndexForScroll = useCallback(
+    (scrollTop: number) => {
+      if (conventionalOffsets.length <= 1) return 0;
+      let low = 0;
+      let high = conventionalOffsets.length - 1;
+      while (low < high) {
+        const mid = Math.floor((low + high) / 2);
+        if (conventionalOffsets[mid] <= scrollTop) {
+          low = mid + 1;
+        } else {
+          high = mid;
+        }
+      }
+      return Math.max(0, low - 1);
+    },
+    [conventionalOffsets],
+  );
+
+  useEffect(() => {
+    conventionalChunkHeightsRef.current = [];
+    conventionalAvgChunkHeightRef.current = DEFAULT_CONVENTIONAL_CHUNK_HEIGHT;
+    pendingConventionalScrollRef.current = null;
+    setConventionalWindow(() => {
+      if (conventionalChunkCount === 0) return { start: 0, end: 0 };
+      const maxIndex = Math.max(0, conventionalChunkCount - 1);
+      const anchorIndex = clamp(wordIndexRef.current ?? 0, 0, Math.max(0, conventionalTokens.length - 1));
+      const anchorChunk = Math.floor(anchorIndex / conventionalChunkSize);
+      const start = clamp(anchorChunk - conventionalBufferChunks, 0, maxIndex);
+      const end = clamp(anchorChunk + conventionalBufferChunks, 0, maxIndex);
+      return { start, end };
+    });
+    setConventionalLayoutVersion((value) => value + 1);
+  }, [conventionalBufferChunks, conventionalChunkCount, conventionalChunkSize, conventionalMode, conventionalTokens.length]);
+
+  useEffect(() => {
+    if (!showConventional || conventionalMode !== 'excerpt') return;
+    ensureConventionalWindowForIndex(wordIndex);
+  }, [conventionalMode, ensureConventionalWindowForIndex, showConventional, wordIndex]);
+
+  useEffect(() => {
+    const pending = pendingConventionalScrollRef.current;
+    if (!pending || !showConventional) return;
+    const container = conventionalRef.current;
+    if (!container) return;
+    if (conventionalMode === 'rendered') {
+      const ratio = tokens.length ? clamp(pending.index / Math.max(1, tokens.length - 1), 0, 1) : 0;
+      const maxScroll = container.scrollHeight - container.clientHeight;
+      scrollLockRef.current = true;
+      container.scrollTo({ top: maxScroll * ratio, behavior: pending.behavior });
+      window.setTimeout(() => {
+        scrollLockRef.current = false;
+      }, 120);
+      pendingConventionalScrollRef.current = null;
+      return;
+    }
+    if (conventionalMode !== 'excerpt') return;
+    const activeWord = container.querySelector(
+      `[data-word-index="${pending.index}"]`,
+    ) as HTMLElement | null;
+    if (!activeWord) return;
+    pendingConventionalScrollRef.current = null;
+    const rect = container.getBoundingClientRect();
+    const wordRect = activeWord.getBoundingClientRect();
+    const targetTop = container.scrollTop + (wordRect.top - rect.top) - rect.height / 2 + wordRect.height / 2;
+    scrollLockRef.current = true;
+    container.scrollTo({ top: targetTop, behavior: pending.behavior });
+    window.setTimeout(() => {
+      scrollLockRef.current = false;
+    }, 120);
+  }, [conventionalMode, conventionalWindow, showConventional, tokens.length]);
   const resolvedFurthest = useMemo<ResolvedFurthest | null>(() => {
     if (!furthestRead || tokens.length === 0) return null;
     if (sourceKind !== 'pdf') {
@@ -1299,6 +2202,26 @@ function App() {
   const progressPercent = tokens.length ? Math.round((wordIndex / tokens.length) * 100) : 0;
   const wordsRemaining = Math.max(0, tokens.length - wordIndex);
   const minutesRemaining = wpm ? Math.max(0, wordsRemaining / wpm) : 0;
+  const pageJumpMax = pdfState?.pageCount ?? 1;
+  const pageJumpDisabled = sourceKind !== 'pdf' || !pdfState || isPdfBusy;
+  const pageJumpPlaceholder = pdfState ? `1-${pdfState.pageCount}` : 'Load PDF';
+  const showPageJump = sourceKind === 'pdf' && !!pdfState;
+  const findCountLabel = isFinding
+    ? 'Searching'
+    : findQuery.trim()
+      ? findMatches.length
+        ? `${findCursor + 1}/${findMatches.length}`
+        : '0'
+      : '-';
+  const granularityLabel =
+    granularity === 'word'
+      ? 'Word'
+      : granularity === 'bigram'
+        ? 'Bi-gram'
+        : granularity === 'trigram'
+          ? 'Tri-gram'
+          : 'Sentence';
+  const singleWordMode = granularity === 'word' && chunkSize === 1;
 
   const applyPdfRange = (
     start: number,
@@ -1565,7 +2488,30 @@ function App() {
     }
   };
 
-  const handleSeek = (nextIndex: number, options?: { pause?: boolean }) => {
+  const scrollConventionalToIndex = (targetIndex: number, behavior: ScrollBehavior = 'smooth') => {
+    if (!showConventional) return;
+    const container = conventionalRef.current;
+    if (!container) return;
+    if (tokens.length === 0) return;
+    if (conventionalMode === 'rendered') {
+      const ratio = tokens.length ? clamp(targetIndex / Math.max(1, tokens.length - 1), 0, 1) : 0;
+      const maxScroll = container.scrollHeight - container.clientHeight;
+      scrollLockRef.current = true;
+      container.scrollTo({ top: maxScroll * ratio, behavior });
+      window.setTimeout(() => {
+        scrollLockRef.current = false;
+      }, 120);
+      return;
+    }
+    if (conventionalMode !== 'excerpt') return;
+    pendingConventionalScrollRef.current = { index: targetIndex, behavior };
+    ensureConventionalWindowForIndex(targetIndex);
+  };
+
+  const handleSeek = (
+    nextIndex: number,
+    options?: { pause?: boolean; focusConventional?: boolean; scrollBehavior?: ScrollBehavior },
+  ) => {
     const total = Math.max(0, tokensRef.current.length - 1);
     const clampedIndex = clamp(nextIndex, 0, total);
     if (options?.pause) {
@@ -1573,24 +2519,144 @@ function App() {
       stopTtsPlayback();
     }
     setWordIndex(clampedIndex);
+    if (options?.focusConventional) {
+      scrollConventionalToIndex(clampedIndex, options.scrollBehavior ?? 'smooth');
+    }
     if (!options?.pause && ttsEnabledRef.current && ttsPlayingRef.current) {
       startTtsFromIndex(clampedIndex);
     }
   };
 
+  const jumpToFindMatch = useCallback(
+    (matchIndex: number) => {
+      const target = findMatches[matchIndex];
+      if (typeof target !== 'number') return;
+      setFindCursor(matchIndex);
+      handleSeek(target, { pause: true, focusConventional: true });
+    },
+    [findMatches, handleSeek],
+  );
+
+  const handleFindStart = useCallback(() => {
+    if (!findMatches.length) return;
+    const currentIndex = wordIndexRef.current;
+    const nextIndex = findMatches.findIndex((index) => index >= currentIndex);
+    jumpToFindMatch(nextIndex === -1 ? 0 : nextIndex);
+  }, [findMatches, jumpToFindMatch]);
+
+  const handleFindStep = useCallback(
+    (direction: 'prev' | 'next') => {
+      if (!findMatches.length) return;
+      const delta = direction === 'next' ? 1 : -1;
+      const nextIndex = (findCursor + delta + findMatches.length) % findMatches.length;
+      jumpToFindMatch(nextIndex);
+    },
+    [findCursor, findMatches.length, jumpToFindMatch],
+  );
+
   useEffect(() => {
     handleSeekRef.current = handleSeek;
   }, [handleSeek]);
 
+  useEffect(() => {
+    const pending = pendingBookmarkRef.current;
+    if (!pending) return;
+    if (!tokens.length) return;
+    if (pending.docHash && hashText(sourceText) !== pending.docHash) {
+      if (!pendingBookmarkMismatchRef.current) {
+        setBookmarkNotice({
+          kind: 'info',
+          message: 'Bookmark link targets a different document. Load the matching text to jump.',
+        });
+        pendingBookmarkMismatchRef.current = true;
+      }
+      return;
+    }
+    if (pendingBookmarkMismatchRef.current) {
+      setBookmarkNotice(null);
+    }
+    pendingBookmarkMismatchRef.current = false;
+    if (sourceKind === 'pdf' && pdfState && pending.pageNumber != null) {
+      if (pending.pageNumber < pageRange.start || pending.pageNumber > pageRange.end) {
+        applyPdfRange(
+          Math.min(pageRange.start, pending.pageNumber),
+          Math.max(pageRange.end, pending.pageNumber),
+        );
+        return;
+      }
+      if (pending.pageOffset != null) {
+        const pageOffset = pageOffsets[pending.pageNumber - pageRange.start];
+        if (typeof pageOffset === 'number') {
+          handleSeek(pageOffset + pending.pageOffset, { pause: true, focusConventional: true });
+          pendingBookmarkRef.current = null;
+          return;
+        }
+      }
+    }
+    const clampedIndex = clamp(pending.index, 0, Math.max(0, tokens.length - 1));
+    handleSeek(clampedIndex, { pause: true, focusConventional: true });
+    pendingBookmarkRef.current = null;
+  }, [
+    applyPdfRange,
+    handleSeek,
+    pageOffsets,
+    pageRange.end,
+    pageRange.start,
+    pdfState,
+    sourceKind,
+    sourceText,
+    tokens.length,
+  ]);
+
   const handleConventionalScroll = () => {
     if (conventionalMode !== 'excerpt') return;
+    const container = conventionalRef.current;
+    if (container) {
+      const now = performance.now();
+      const lastTop = lastConventionalScrollTopRef.current;
+      const lastAt = lastConventionalScrollAtRef.current;
+      const signedDelta = container.scrollTop - lastTop;
+      const delta = Math.abs(signedDelta);
+      const dt = now - lastAt;
+      if (signedDelta !== 0) {
+        conventionalScrollDirectionRef.current = signedDelta > 0 ? 1 : -1;
+      }
+      lastConventionalScrollTopRef.current = container.scrollTop;
+      lastConventionalScrollAtRef.current = now;
+      const velocity = dt > 0 ? delta / dt : 0;
+      let nextBoost = 0;
+      if (velocity > 1.6) {
+        nextBoost = 2;
+      } else if (velocity > 0.8) {
+        nextBoost = 1;
+      }
+      if (nextBoost !== conventionalBufferBoostRef.current) {
+        setConventionalBufferBoost(nextBoost);
+      }
+      if (nextBoost > 0) {
+        if (conventionalBoostTimeoutRef.current) {
+          window.clearTimeout(conventionalBoostTimeoutRef.current);
+        }
+        conventionalBoostTimeoutRef.current = window.setTimeout(() => {
+          setConventionalBufferBoost((prev) => (prev === 0 ? prev : 0));
+        }, 220);
+      }
+    }
+    if (container && conventionalChunkCount > 0 && !scrollRafRef.current) {
+      scrollRafRef.current = window.requestAnimationFrame(() => {
+        scrollRafRef.current = null;
+        const lead = Math.min(160, container.clientHeight * 0.4);
+        const targetScroll = container.scrollTop + lead * conventionalScrollDirectionRef.current;
+        const chunkIndex = findChunkIndexForScroll(targetScroll);
+        updateConventionalWindowForChunk(chunkIndex);
+      });
+    }
     if (!conventionalSeekEnabledRef.current || scrollLockRef.current) return;
     if (scrollEndTimeoutRef.current) {
       window.clearTimeout(scrollEndTimeoutRef.current);
     }
     scrollEndTimeoutRef.current = window.setTimeout(() => {
       scrollEndTimeoutRef.current = null;
-      const container = conventionalRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
       const pickX = rect.left + 24;
@@ -1653,6 +2719,102 @@ function App() {
       startTtsFromIndex(wordIndex);
     }
   }, [ttsVoice, ttsSpeed, ttsLanguage, ttsChunkWords]);
+
+  const ensurePdfWorker = useCallback(() => {
+    if (pdfWorkerRef.current) return pdfWorkerRef.current;
+    try {
+      const worker = new Worker(new URL('./pdfWorker.ts', import.meta.url), { type: 'module' });
+      worker.onmessage = (event) => {
+        const message = event.data as {
+          id?: number;
+          type?: 'progress' | 'result';
+          current?: number;
+          total?: number;
+          ok?: boolean;
+          payload?: {
+            pageTexts: string[];
+            pageTokenCounts: number[];
+            outline: PdfOutlineItem[];
+            pageCount: number;
+          };
+          error?: string;
+        };
+        if (typeof message?.id !== 'number') return;
+        const callbacks = pdfWorkerCallbacksRef.current.get(message.id);
+        if (!callbacks) return;
+        if (message.type === 'progress') {
+          callbacks.onProgress?.(message.current ?? 0, message.total ?? 0);
+          return;
+        }
+        if (message.type === 'result') {
+          pdfWorkerCallbacksRef.current.delete(message.id);
+          if (message.ok && message.payload) {
+            callbacks.resolve(message.payload);
+          } else {
+            callbacks.reject(new Error(message.error || 'Failed to read PDF.'));
+          }
+        }
+      };
+      worker.onerror = (error) => {
+        console.warn('PDF worker error, falling back to main thread.', error);
+        pdfWorkerCallbacksRef.current.forEach((callbacks) => {
+          callbacks.reject(new Error('PDF worker failed.'));
+        });
+        pdfWorkerCallbacksRef.current.clear();
+        worker.terminate();
+        pdfWorkerRef.current = null;
+      };
+      pdfWorkerRef.current = worker;
+      return worker;
+    } catch (error) {
+      console.warn('PDF worker unavailable, using main thread.', error);
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pdfWorkerRef.current) {
+        pdfWorkerRef.current.terminate();
+        pdfWorkerRef.current = null;
+      }
+      pdfWorkerCallbacksRef.current.forEach((callbacks) => {
+        callbacks.reject(new Error('PDF worker terminated.'));
+      });
+      pdfWorkerCallbacksRef.current.clear();
+    };
+  }, []);
+
+  const extractPdfData = useCallback(
+    async (data: Uint8Array, onProgress?: (current: number, total: number) => void) => {
+      if (typeof Worker === 'undefined') {
+        return extractPdfDataMainThread(data, onProgress);
+      }
+      const worker = ensurePdfWorker();
+      if (!worker) {
+        return extractPdfDataMainThread(data, onProgress);
+      }
+      const id = pdfWorkerIdRef.current + 1;
+      pdfWorkerIdRef.current = id;
+      const task = new Promise<{
+        pageTexts: string[];
+        pageTokenCounts: number[];
+        outline: PdfOutlineItem[];
+        pageCount: number;
+      }>((resolve, reject) => {
+        pdfWorkerCallbacksRef.current.set(id, { resolve, reject, onProgress });
+      });
+      const bufferCopy = data.slice().buffer;
+      worker.postMessage({ id, type: 'extract', buffer: bufferCopy }, [bufferCopy]);
+      try {
+        return await task;
+      } catch (error) {
+        console.warn('PDF worker failed, falling back to main thread.', error);
+        return extractPdfDataMainThread(data, onProgress);
+      }
+    },
+    [ensurePdfWorker],
+  );
 
   const loadTextFile = async (
     file: File,
@@ -1738,7 +2900,7 @@ function App() {
     applyPdfRange(range.start, range.end);
   };
 
-  const jumpToPage = (pageNumber: number) => {
+  const jumpToPage = (pageNumber: number, options?: { focusConventional?: boolean }) => {
     if (!pdfState) return;
     const safePage = clamp(pageNumber, 1, pdfState.pageCount);
     if (safePage < pageRange.start || safePage > pageRange.end) {
@@ -1751,7 +2913,28 @@ function App() {
       return;
     }
     const localIndex = safePage - pageRange.start;
-    handleSeek(pageOffsets[localIndex] ?? 0);
+    handleSeek(pageOffsets[localIndex] ?? 0, { focusConventional: options?.focusConventional });
+  };
+
+  const handleJumpToPage = () => {
+    if (!pdfState) return;
+    if (!jumpPage.trim()) return;
+    const raw = Number(jumpPage);
+    if (!Number.isFinite(raw)) return;
+    const safePage = clamp(Math.round(raw), 1, pdfState.pageCount);
+    setJumpPage(String(safePage));
+    jumpToPage(safePage, { focusConventional: true });
+  };
+
+  const handleJumpToPercent = () => {
+    if (!tokens.length) return;
+    if (!jumpPercent.trim()) return;
+    const raw = Number(jumpPercent);
+    if (!Number.isFinite(raw)) return;
+    const safePercent = clamp(raw, 0, 100);
+    const targetIndex = Math.round((safePercent / 100) * (tokens.length - 1));
+    setJumpPercent(String(Math.round(safePercent)));
+    handleSeek(targetIndex, { focusConventional: true });
   };
 
   const runOcrForRange = async () => {
@@ -1828,8 +3011,10 @@ function App() {
         setPageOffsets([]);
         setPageRange({ start: 1, end: 1 });
         setPageRangeDraft({ start: 1, end: 1 });
-        setSourceText(text);
-        setTitle(file.name.replace(/\.[^/.]+$/, ''));
+        startTransition(() => {
+          setSourceText(text);
+          setTitle(file.name.replace(/\.[^/.]+$/, ''));
+        });
         setWordIndex(0);
         setIsPlaying(false);
       }
@@ -1837,12 +3022,19 @@ function App() {
     event.target.value = '';
   };
 
-  const handleParallelFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSecondaryFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const text = await loadTextFile(file, setParallelNotice);
+    setSecondaryFileMeta({
+      name: file.name,
+      size: file.size,
+      lastModified: file.lastModified,
+    });
+    const text = await loadTextFile(file, setSecondaryNotice);
     if (text) {
-      setParallelText(text);
+      startTransition(() => {
+        setSecondaryText(text);
+      });
     }
     event.target.value = '';
   };
@@ -1870,35 +3062,182 @@ function App() {
     setBookmarks((prev) => [nextBookmark, ...prev].slice(0, 24));
   };
 
-  const handleDeleteBookmark = (id: string) => {
+  const bookmarkUrlFormat: 'encoded' | 'readable' = 'readable';
+
+  const buildBookmarkPayload = useCallback(
+    (bookmark: { index: number; pageNumber?: number; pageOffset?: number }) => {
+      const payload: BookmarkPayload = {
+        v: BOOKMARK_VERSION,
+        index: bookmark.index,
+        sourceKind,
+        title: title || undefined,
+        docHash: sourceText ? hashText(sourceText) : undefined,
+      };
+      if (bookmark.pageNumber != null && bookmark.pageOffset != null) {
+        payload.pageNumber = bookmark.pageNumber;
+        payload.pageOffset = bookmark.pageOffset;
+      }
+      return payload;
+    },
+    [sourceKind, sourceText, title],
+  );
+
+  const setBookmarkUrl = useCallback((payload: BookmarkPayload) => {
+    if (typeof window === 'undefined') return '';
+    const url = buildBookmarkUrl(window.location.href, payload, bookmarkUrlFormat);
+    window.history.replaceState(null, '', url);
+    return url;
+  }, [bookmarkUrlFormat]);
+
+  const handleShareBookmark = useCallback(
+    async (bookmark: Bookmark) => {
+      const payload = buildBookmarkPayload(bookmark);
+      const url = setBookmarkUrl(payload);
+      if (!url) return;
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(url);
+          setBookmarkNotice({ kind: 'success', message: 'Bookmark link copied.' });
+          return;
+        } catch {
+          // Ignore clipboard failures.
+        }
+      }
+      setBookmarkNotice({ kind: 'info', message: 'Bookmark link set in the URL bar.' });
+    },
+    [buildBookmarkPayload, setBookmarkUrl],
+  );
+
+  const handleShareFurthest = useCallback(async () => {
+    if (!furthestRead) return;
+    const payload = buildBookmarkPayload(furthestRead);
+    const url = setBookmarkUrl(payload);
+    if (!url) return;
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(url);
+        setBookmarkNotice({ kind: 'success', message: 'Furthest read link copied.' });
+        return;
+      } catch {
+        // Ignore clipboard failures.
+      }
+    }
+    setBookmarkNotice({ kind: 'info', message: 'Furthest read link set in the URL bar.' });
+  }, [buildBookmarkPayload, furthestRead, setBookmarkUrl]);
+
+  const handleFurthestJump = useCallback(
+    (furthest: ResolvedFurthest) => {
+      const resolvedIndex = furthest.resolvedIndex ?? null;
+      const payload = buildBookmarkPayload(furthest);
+      setBookmarkUrl(payload);
+      if (resolvedIndex === null || furthest.outOfRange) return;
+      handleSeek(resolvedIndex, { focusConventional: true });
+    },
+    [buildBookmarkPayload, handleSeek, setBookmarkUrl],
+  );
+
+  const handleBookmarkJump = useCallback(
+    (bookmark: ResolvedBookmark) => {
+      const resolvedIndex = bookmark.resolvedIndex ?? null;
+      const payload = buildBookmarkPayload(bookmark);
+      setBookmarkUrl(payload);
+      if (resolvedIndex === null || bookmark.outOfRange) return;
+      handleSeek(resolvedIndex, { focusConventional: true });
+    },
+    [buildBookmarkPayload, handleSeek, setBookmarkUrl],
+  );
+
+  const handleDeleteBookmark = useCallback((id: string) => {
     setBookmarks((prev) => prev.filter((bookmark) => bookmark.id !== id));
-  };
+  }, []);
+  const handleClearBookmarks = useCallback(() => {
+    setBookmarks([]);
+  }, []);
+
+  const bookmarkRows = useMemo(() => {
+    if (!resolvedFurthest && resolvedBookmarks.length === 0) return null;
+    return (
+      <div className="bookmark-list">
+        {resolvedFurthest && (() => {
+          const pageTag = resolvedFurthest.pageNumber ? `p. ${resolvedFurthest.pageNumber}` : null;
+          const progress = resolvedFurthest.resolvedIndex !== null && tokens.length
+            ? Math.round((resolvedFurthest.resolvedIndex / tokens.length) * 100)
+            : null;
+          const labelParts = ['Furthest read'];
+          if (pageTag) labelParts.push(pageTag);
+          labelParts.push(progress !== null ? `${progress}%` : 'out of range');
+          return (
+            <div key="furthest-read" className="bookmark-row auto">
+              <button
+                type="button"
+                className="bookmark-jump"
+                onClick={() => handleFurthestJump(resolvedFurthest)}
+                disabled={resolvedFurthest.outOfRange || resolvedFurthest.resolvedIndex === null}
+              >
+                {labelParts.join(' · ')}
+              </button>
+              <button
+                type="button"
+                className="bookmark-share ghost"
+                onClick={() => void handleShareFurthest()}
+              >
+                Share
+              </button>
+            </div>
+          );
+        })()}
+        {resolvedBookmarks.map((bookmark) => {
+          const pageTag = bookmark.pageNumber ? `p. ${bookmark.pageNumber}` : null;
+          const progress = bookmark.resolvedIndex !== null && tokens.length
+            ? Math.round((bookmark.resolvedIndex / tokens.length) * 100)
+            : null;
+          const labelParts = [bookmark.label];
+          if (pageTag) labelParts.push(pageTag);
+          labelParts.push(progress !== null ? `${progress}%` : 'out of range');
+          return (
+            <div key={bookmark.id} className="bookmark-row">
+              <button
+                type="button"
+                className="bookmark-jump"
+                onClick={() => handleBookmarkJump(bookmark)}
+                disabled={bookmark.outOfRange || bookmark.resolvedIndex === null}
+              >
+                {labelParts.join(' · ')}
+              </button>
+              <button
+                type="button"
+                className="bookmark-share ghost"
+                onClick={() => void handleShareBookmark(bookmark)}
+              >
+                Share
+              </button>
+              <button
+                type="button"
+                className="bookmark-remove ghost"
+                onClick={() => handleDeleteBookmark(bookmark.id)}
+              >
+                Delete
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }, [
+    handleBookmarkJump,
+    handleDeleteBookmark,
+    handleFurthestJump,
+    handleShareBookmark,
+    handleShareFurthest,
+    resolvedBookmarks,
+    resolvedFurthest,
+    tokens.length,
+  ]);
 
   const handleCompanionSend = () => {
     if (!companionInput.trim()) return;
     setCompanionLog((prev) => [`You: ${companionInput.trim()}`, ...prev]);
     setCompanionInput('');
-  };
-
-  const renderDisplay = () => {
-    if (!currentChunk.length) {
-      return <span className="display-placeholder">Load a passage to begin.</span>;
-    }
-    if (chunkSize !== 1) {
-      return <span className="display-chunk">{currentChunk.join(' ')}</span>;
-    }
-    const word = currentChunk[0];
-    const pivotIndex = getPivotIndex(word);
-    const left = word.slice(0, pivotIndex);
-    const pivot = word[pivotIndex] || '';
-    const right = word.slice(pivotIndex + 1);
-    return (
-      <span className="display-word" aria-live="polite">
-        <span className="word-left">{left}</span>
-        <span className="word-pivot">{pivot}</span>
-        <span className="word-right">{right}</span>
-      </span>
-    );
   };
 
   const renderOutlineItems = (items: PdfOutlineItem[], depth = 0) =>
@@ -1929,7 +3268,7 @@ function App() {
           <p className="kicker">Reading Lab</p>
           <h1>Focus Reader</h1>
           <p className="sub">
-            Speed reading with memory, parallel texts, and a future hermeneutics companion.
+            Speed reading with memory, DJ-style controls, and a future hermeneutics companion.
           </p>
         </div>
         <div className="hero-actions">
@@ -1973,24 +3312,55 @@ function App() {
           </label>
 
           <div className="field-row">
+            <label className="field">
+              <span>Primary language</span>
+              <input
+                value={primaryLanguage}
+                onChange={(event) => setPrimaryLanguage(event.target.value)}
+                placeholder="English"
+              />
+            </label>
+            <label className="field">
+              <span>Secondary language</span>
+              <input
+                value={secondaryLanguage}
+                onChange={(event) => setSecondaryLanguage(event.target.value)}
+                placeholder="German"
+              />
+            </label>
+          </div>
+
+          <div className="field-row">
             <label className="field file">
-              <span>Import .txt/.md/.pdf</span>
+              <span>Import primary .txt/.md/.pdf</span>
               <input type="file" accept=".txt,.md,.text,.pdf,application/pdf" onChange={handlePrimaryFile} />
             </label>
             <label className="field file">
-              <span>Parallel text</span>
-              <input type="file" accept=".txt,.md,.text,.pdf,application/pdf" onChange={handleParallelFile} />
+              <span>Import secondary .txt/.md/.pdf</span>
+              <input type="file" accept=".txt,.md,.text,.pdf,application/pdf" onChange={handleSecondaryFile} />
             </label>
           </div>
-          {(primaryNotice || parallelNotice) && (
+          {(primaryNotice || secondaryNotice) && (
             <div className="notice-row">
               {primaryNotice && (
                 <p className={`notice ${primaryNotice.kind}`}>Primary: {primaryNotice.message}</p>
               )}
-              {parallelNotice && (
-                <p className={`notice ${parallelNotice.kind}`}>Parallel: {parallelNotice.message}</p>
+              {secondaryNotice && (
+                <p className={`notice ${secondaryNotice.kind}`}>Secondary: {secondaryNotice.message}</p>
               )}
             </div>
+          )}
+          {workerNotice && (
+            <p className={`notice ${workerNotice.kind}`}>Indexer: {workerNotice.message}</p>
+          )}
+          {(isIndexingPrimary || isIndexingSecondary) && (
+            <p className="hint">
+              {isIndexingPrimary && isIndexingSecondary
+                ? 'Indexing primary and secondary texts...'
+                : isIndexingPrimary
+                  ? 'Indexing primary text...'
+                  : 'Indexing secondary text...'}
+            </p>
           )}
 
           {sourceKind === 'pdf' && pdfState && (
@@ -2057,12 +3427,12 @@ function App() {
           )}
 
           <label className="field">
-            <span>Parallel text (optional)</span>
+            <span>Secondary language text (optional)</span>
             <textarea
               rows={6}
-              value={parallelText}
-              onChange={(event) => setParallelText(event.target.value)}
-              placeholder="Paste a translation or commentary to align."
+              value={secondaryText}
+              onChange={(event) => setSecondaryText(event.target.value)}
+              placeholder="Paste a translation or secondary language text."
             />
           </label>
 
@@ -2096,101 +3466,6 @@ function App() {
           <p className="hint">
             Kindle support requires DRM-free exports. PDF text extraction is best on text-based PDFs.
           </p>
-        </section>
-
-        <section className="panel reader-panel">
-          <div className="reader-display">
-            <div className="focus-rail" aria-hidden="true" />
-            {renderDisplay()}
-          </div>
-
-          <div className="controls">
-            <button
-              type="button"
-              onClick={() => {
-                setIsPlaying((prev) => !prev);
-              }}
-              disabled={!tokens.length}
-            >
-              {isPlaying ? 'Pause' : 'Start'}
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => handleSeek(wordIndex - chunkSize)}
-              disabled={!tokens.length}
-            >
-              Back
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => handleSeek(wordIndex + chunkSize)}
-              disabled={!tokens.length}
-            >
-              Forward
-            </button>
-            <button type="button" className="ghost" onClick={handleBookmark} disabled={!tokens.length}>
-              Bookmark
-            </button>
-          </div>
-
-          <div className="slider-group">
-            <label className="slider">
-              <span>Words per minute</span>
-              <input
-                type="range"
-                min={120}
-                max={900}
-                value={wpm}
-                onChange={(event) => setWpm(Number(event.target.value))}
-              />
-              <strong>{wpm} wpm</strong>
-            </label>
-            <label className="slider">
-              <span>Chunk size</span>
-              <input
-                type="range"
-                min={1}
-                max={5}
-                value={chunkSize}
-                onChange={(event) => setChunkSize(Number(event.target.value))}
-              />
-              <strong>{chunkSize} word{chunkSize > 1 ? 's' : ''}</strong>
-            </label>
-            <label className="slider">
-              <span>Sentence pause</span>
-              <input
-                type="range"
-                min={0}
-                max={400}
-                step={20}
-                value={sentencePauseMs}
-                onChange={(event) => setSentencePauseMs(Number(event.target.value))}
-              />
-              <strong>{sentencePauseMs} ms</strong>
-            </label>
-          </div>
-
-          <div className="session-panel">
-            <div className="session-header">
-              <h3>Session Stats</h3>
-            </div>
-            <div className="session-metrics">
-              <div>
-                <span className="meta-label">Time</span>
-                <strong>{sessionDurationLabel}</strong>
-              </div>
-              <div>
-                <span className="meta-label">Words read</span>
-                <strong>{wordsRead.toLocaleString()}</strong>
-              </div>
-              <div>
-                <span className="meta-label">Completion</span>
-                <strong>{sessionPercent}%</strong>
-              </div>
-            </div>
-          </div>
 
           <div className="tts-panel">
             <div className="tts-header">
@@ -2320,9 +3595,248 @@ function App() {
               />
             </div>
             <p className="hint">
-              Swipe left/right to move back/forward. Long blink toggles pause. Video stays on-device.
+              Swipe left/right to move back/next. Long blink toggles pause. Video stays on-device.
             </p>
             {cameraNotice && <p className={`notice ${cameraNotice.kind}`}>{cameraNotice.message}</p>}
+          </div>
+        </section>
+
+        <section className="panel reader-panel">
+          <div className="reader-display">
+            <div className="focus-rail" aria-hidden="true" />
+            <ReaderDisplay
+              currentSegments={currentSegments}
+              currentSegmentText={currentSegmentText}
+              singleWordMode={singleWordMode}
+              contextRadius={contextRadius}
+              tokens={tokens}
+              wordIndex={wordIndex}
+            />
+          </div>
+
+          {bilingualReady && (
+            <div className="bilingual-panel">
+              <div className="bilingual-header">
+                <h3>Dual Language</h3>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={showBilingual}
+                    onChange={(event) => setShowBilingual(event.target.checked)}
+                  />
+                  <span>Show</span>
+                </label>
+              </div>
+              {showBilingual && (
+                <div className="bilingual-grid">
+                  <div className="bilingual-column">
+                    <span className="bilingual-label">{primaryLanguage || 'Primary'}</span>
+                    <p>{currentSegmentText || '...'}</p>
+                  </div>
+                  <div className="bilingual-column">
+                    <span className="bilingual-label">{secondaryLanguage || 'Secondary'}</span>
+                    <p>{secondarySegmentChunkText || '...'}</p>
+                  </div>
+                </div>
+              )}
+              {showBilingual && granularity !== 'sentence' && (
+                <p className="hint">Set granularity to Sentence for best alignment.</p>
+              )}
+            </div>
+          )}
+
+          <div className="deck-panel">
+            <div className="deck-header">
+              <span className="deck-label">Main Deck</span>
+              <span className={`deck-led ${isPlaying ? 'live' : ''}`} aria-hidden="true" />
+            </div>
+            <div className="controls deck-controls">
+              <button
+                type="button"
+                className={`deck-btn primary ${isPlaying ? 'live' : ''}`}
+                aria-pressed={isPlaying}
+                onClick={() => {
+                  setIsPlaying((prev) => !prev);
+                }}
+                disabled={!tokens.length}
+              >
+                {isPlaying ? 'Pause' : 'Start'}
+              </button>
+              <button type="button" className="deck-btn ghost" onClick={handleBookmark} disabled={!tokens.length}>
+                Bookmark
+              </button>
+              <button
+                type="button"
+                className="deck-btn back"
+                onClick={() =>
+                  handleSeek(getSteppedWordIndex(wordIndex, 'back', chunkSize, segmentStartIndices, segments))
+                }
+                disabled={!tokens.length}
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                className="deck-btn next"
+                onClick={() =>
+                  handleSeek(getSteppedWordIndex(wordIndex, 'next', chunkSize, segmentStartIndices, segments))
+                }
+                disabled={!tokens.length}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+
+          <div className="mixer-panel">
+            <div className="mixer-header">
+              <span className="mixer-label">Mixer</span>
+              <span className="mixer-led" aria-hidden="true" />
+            </div>
+            <div className="slider-group">
+              <label className="slider">
+                <span>Granularity</span>
+                <select value={granularity} onChange={(event) => setGranularity(event.target.value as Granularity)}>
+                  <option value="word">Word</option>
+                  <option value="bigram">Bi-gram</option>
+                  <option value="trigram">Tri-gram</option>
+                  <option value="sentence">Sentence</option>
+                </select>
+                <strong>{granularityLabel}</strong>
+              </label>
+              <label className="slider">
+                <span>Words per minute</span>
+                <input
+                  type="range"
+                  min={120}
+                  max={900}
+                  value={wpm}
+                  onChange={(event) => setWpm(Number(event.target.value))}
+                />
+                <strong>{wpm} wpm</strong>
+              </label>
+              <label className="slider">
+                <span>Chunk size</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={5}
+                  value={chunkSize}
+                  onChange={(event) => setChunkSize(Number(event.target.value))}
+                  disabled={granularity === 'sentence'}
+                />
+                <strong>
+                  {chunkSize} {granularity === 'word' ? 'word' : 'segment'}
+                  {chunkSize > 1 ? 's' : ''}
+                </strong>
+              </label>
+              <label className="slider">
+                <span>Context words</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={6}
+                  value={contextRadius}
+                  onChange={(event) => setContextRadius(Number(event.target.value))}
+                  disabled={chunkSize !== 1 || granularity !== 'word'}
+                />
+                <strong>{contextRadius ? `${contextRadius} each side` : 'Off'}</strong>
+              </label>
+              <label className="slider">
+                <span>Minimum word time</span>
+                <input
+                  type="range"
+                  min={80}
+                  max={300}
+                  step={10}
+                  value={minWordMs}
+                  onChange={(event) => setMinWordMs(Number(event.target.value))}
+                />
+                <strong>{minWordMs} ms</strong>
+              </label>
+              <label className="slider">
+                <span>Sentence pause</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={400}
+                  step={20}
+                  value={sentencePauseMs}
+                  onChange={(event) => setSentencePauseMs(Number(event.target.value))}
+                />
+                <strong>{sentencePauseMs} ms</strong>
+              </label>
+            </div>
+          </div>
+
+          <div className="session-panel">
+            <div className="session-header">
+              <h3>Readout</h3>
+            </div>
+            <div className="session-metrics">
+              <div>
+                <span className="meta-label">Time</span>
+                <strong>{sessionDurationLabel}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Words read</span>
+                <strong>{wordsRead.toLocaleString()}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Completion</span>
+                <strong>{sessionPercent}%</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="find-panel">
+            <div className="find-header">
+              <h3>Find</h3>
+              <span className="find-count">{findCountLabel}</span>
+            </div>
+            <div className="find-row">
+              <input
+                type="text"
+                value={findQuery}
+                onChange={(event) => setFindQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    handleFindStart();
+                  }
+                }}
+                placeholder="Search the text"
+              />
+              <button
+                type="button"
+                className="find-btn"
+                onClick={handleFindStart}
+                disabled={!findQuery.trim()}
+              >
+                Find
+              </button>
+            </div>
+            <div className="find-actions">
+              <button
+                type="button"
+                className="find-btn secondary"
+                onClick={() => handleFindStep('prev')}
+                disabled={!findMatches.length}
+              >
+                Prev
+              </button>
+              <button
+                type="button"
+                className="find-btn secondary"
+                onClick={() => handleFindStep('next')}
+                disabled={!findMatches.length}
+              >
+                Next
+              </button>
+            </div>
+            {findQuery.trim() && !findMatches.length && !isFinding && (
+              <p className="hint">No matches found.</p>
+            )}
           </div>
 
           <label className="progress">
@@ -2362,79 +3876,66 @@ function App() {
             </div>
           )}
 
-          <div className="bookmarks">
-            <div className="bookmarks-header">
-              <h3>Bookmarks</h3>
-              <button type="button" className="ghost" onClick={() => setBookmarks([])}>
-                Clear
-              </button>
-            </div>
-            {!resolvedFurthest && resolvedBookmarks.length === 0 ? (
-              <p className="hint">Save anchor points to return to later.</p>
-            ) : (
-              <div className="bookmark-list">
-                {resolvedFurthest && (() => {
-                  const pageTag = resolvedFurthest.pageNumber ? `p. ${resolvedFurthest.pageNumber}` : null;
-                  const progress = resolvedFurthest.resolvedIndex !== null && tokens.length
-                    ? Math.round((resolvedFurthest.resolvedIndex / tokens.length) * 100)
-                    : null;
-                  const labelParts = ['Furthest read'];
-                  if (pageTag) labelParts.push(pageTag);
-                  labelParts.push(progress !== null ? `${progress}%` : 'out of range');
-                  const resolvedIndex = resolvedFurthest.resolvedIndex ?? null;
-                  return (
-                    <div key="furthest-read" className="bookmark-row auto">
-                      <button
-                        type="button"
-                        className="bookmark-jump"
-                        onClick={() => {
-                          if (resolvedIndex !== null) {
-                            handleSeek(resolvedIndex);
-                          }
-                        }}
-                        disabled={resolvedFurthest.outOfRange || resolvedIndex === null}
-                      >
-                        {labelParts.join(' · ')}
-                      </button>
-                    </div>
-                  );
-                })()}
-                {resolvedBookmarks.map((bookmark) => {
-                  const pageTag = bookmark.pageNumber ? `p. ${bookmark.pageNumber}` : null;
-                  const progress = bookmark.resolvedIndex !== null && tokens.length
-                    ? Math.round((bookmark.resolvedIndex / tokens.length) * 100)
-                    : null;
-                  const labelParts = [bookmark.label];
-                  if (pageTag) labelParts.push(pageTag);
-                  labelParts.push(progress !== null ? `${progress}%` : 'out of range');
-                  const resolvedIndex = bookmark.resolvedIndex ?? null;
-                  return (
-                    <div key={bookmark.id} className="bookmark-row">
-                      <button
-                        type="button"
-                        className="bookmark-jump"
-                        onClick={() => {
-                          if (resolvedIndex !== null) {
-                            handleSeek(resolvedIndex);
-                          }
-                        }}
-                        disabled={bookmark.outOfRange || resolvedIndex === null}
-                      >
-                        {labelParts.join(' · ')}
-                      </button>
-                      <button
-                        type="button"
-                        className="bookmark-remove ghost"
-                        onClick={() => handleDeleteBookmark(bookmark.id)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  );
-                })}
+          <div className="jump-nav">
+            {showPageJump && (
+              <div className="jump-field">
+                <span>Go to page</span>
+                <div className="jump-input">
+                  <input
+                    type="number"
+                    min={1}
+                    max={pageJumpMax}
+                    inputMode="numeric"
+                    value={jumpPage}
+                    onChange={(event) => setJumpPage(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        handleJumpToPage();
+                      }
+                    }}
+                    placeholder={pageJumpPlaceholder}
+                    disabled={pageJumpDisabled}
+                  />
+                  <button type="button" className="ghost small" onClick={handleJumpToPage} disabled={pageJumpDisabled}>
+                    Go
+                  </button>
+                </div>
               </div>
             )}
+            <div className="jump-field">
+              <span>Go to %</span>
+              <div className="jump-input">
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={1}
+                  inputMode="numeric"
+                  value={jumpPercent}
+                  onChange={(event) => setJumpPercent(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      handleJumpToPercent();
+                    }
+                  }}
+                  placeholder="0-100"
+                  disabled={!tokens.length}
+                />
+                <button
+                  type="button"
+                  className="ghost small"
+                  onClick={handleJumpToPercent}
+                  disabled={!tokens.length}
+                >
+                  Go
+                </button>
+              </div>
+            </div>
           </div>
+
+          <BookmarksPanel onClear={handleClearBookmarks} bookmarkRows={bookmarkRows} notice={bookmarkNotice} />
         </section>
 
         <section className="panel companion-panel">
@@ -2501,43 +4002,16 @@ function App() {
           </div>
 
           {showConventional && conventionalMode === 'excerpt' && (
-            <div
-              className="snippet full"
+            <ConventionalExcerpt
               ref={conventionalRef}
+              nodes={conventionalNodes}
+              spacerHeights={conventionalSpacerHeights}
               onScroll={handleConventionalScroll}
               onClick={handleConventionalClick}
-            >
-              {conventionalNodes}
-            </div>
+            />
           )}
           {showConventional && conventionalMode === 'rendered' && (
-            <div className="snippet full rendered" ref={conventionalRef}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {sourceText || 'No text loaded.'}
-              </ReactMarkdown>
-            </div>
-          )}
-
-          <div className="panel-header">
-            <h2>Parallel Text</h2>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={showParallel}
-                onChange={(event) => setShowParallel(event.target.checked)}
-              />
-              <span>Sync with primary</span>
-            </label>
-          </div>
-
-          {showParallel && parallelTokens.length > 0 && (
-            <div className="snippet secondary">
-              {parallelSnippet.map((token, index) => (
-                <span key={`${index}-${token.text}`} className={token.isActive ? 'active' : ''}>
-                  {token.text}{' '}
-                </span>
-              ))}
-            </div>
+            <ConventionalRendered ref={conventionalRef} content={renderedMarkdown} />
           )}
 
           <div className="panel-header">
