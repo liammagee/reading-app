@@ -5,6 +5,8 @@
   display: flex;
   flex-direction: column;
   gap: 32px;
+  width: 100%;
+  overflow-x: hidden;
 }
 
 .app-shell.view-mobile {
@@ -21,15 +23,25 @@
   justify-content: space-between;
   align-items: flex-end;
   gap: 24px;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.hero > div:first-child {
+  min-width: 0;
+  flex: 1;
 }
 
 .hero h1 {
   margin: 8px 0 6px;
-  font-size: clamp(2.4rem, 2vw + 1.6rem, 3.4rem);
+  font-size: clamp(1.6rem, 5vw + 0.5rem, 3.4rem);
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   font-family: var(--display-font);
+  overflow-wrap: break-word;
+  word-break: break-word;
+  max-width: 100%;
 }
 
 .kicker {
@@ -43,7 +55,7 @@
 
 .sub {
   margin: 0;
-  max-width: 520px;
+  max-width: min(520px, 100%);
   color: var(--ink-muted);
 }
 
@@ -2088,5 +2100,141 @@
 
   .find-row {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Native mobile app feel */
+@media (max-width: 560px) {
+  .app-shell {
+    padding: 24px 12px 40px;
+    padding-top: max(24px, env(safe-area-inset-top));
+    padding-bottom: max(40px, calc(env(safe-area-inset-bottom) + 24px));
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    gap: 20px;
+  }
+
+  .layout {
+    gap: 16px;
+  }
+
+  .panel {
+    border-radius: 16px;
+    padding: 16px;
+    margin-left: -4px;
+    margin-right: -4px;
+    width: calc(100% + 8px);
+  }
+
+  .hero {
+    gap: 16px;
+  }
+
+  .hero h1 {
+    font-size: clamp(1.4rem, 6vw, 2rem);
+    letter-spacing: 0.02em;
+  }
+
+  .view-toggle {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .view-toggle button {
+    padding: 10px 8px;
+    font-size: 0.6rem;
+    min-height: 44px;
+  }
+
+  .deck-panel {
+    border-radius: 14px;
+    padding: 12px;
+  }
+
+  .deck-controls .deck-btn {
+    min-height: 70px;
+    border-radius: 10px;
+    font-size: 0.78rem;
+    touch-action: manipulation;
+  }
+
+  .deck-controls .deck-btn.primary {
+    font-size: 0.88rem;
+  }
+
+  .status-pill {
+    font-size: 0.68rem;
+    padding: 8px 12px;
+  }
+
+  .reader-display {
+    border-radius: 14px;
+    min-height: 140px;
+    padding: 0 12px;
+  }
+
+  .controls {
+    gap: 10px;
+  }
+
+  .reader-panel .controls {
+    padding: 8px;
+    border-radius: 12px;
+  }
+
+  .mixer-panel {
+    padding: 10px;
+    border-radius: 14px;
+  }
+
+  .nav-deck {
+    gap: 12px;
+  }
+
+  .ghost.small {
+    padding: 8px 12px;
+    min-height: 36px;
+  }
+
+  .hotkey-sheet {
+    display: none;
+  }
+}
+
+/* Extra small mobile (iPhone SE, etc.) */
+@media (max-width: 380px) {
+  .app-shell {
+    padding: 16px 8px 32px;
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-bottom: max(32px, calc(env(safe-area-inset-bottom) + 16px));
+  }
+
+  .hero h1 {
+    font-size: 1.3rem;
+    letter-spacing: 0.01em;
+  }
+
+  .panel {
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  .deck-controls .deck-btn {
+    min-height: 64px;
+    font-size: 0.72rem;
+  }
+
+  .view-toggle button {
+    font-size: 0.55rem;
+    padding: 8px 6px;
+  }
+
+  .kicker {
+    font-size: 0.6rem;
+    letter-spacing: 0.2em;
+  }
+
+  .sub {
+    font-size: 0.9rem;
   }
 }
