@@ -4303,68 +4303,6 @@ function App() {
         </section>
 
         <section className="panel companion-panel">
-          <div className="panel-header">
-            <h2>Conventional View</h2>
-            <div className="toggle-row">
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={showConventional}
-                  onChange={(event) => setShowConventional(event.target.checked)}
-                />
-                <span>Show view</span>
-              </label>
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={conventionalMode === 'rendered'}
-                  onChange={(event) => setConventionalMode(event.target.checked ? 'rendered' : 'excerpt')}
-                  disabled={!showConventional}
-                />
-                <span>Rendered markdown</span>
-              </label>
-              <button
-                type="button"
-                className="ghost small"
-                onClick={() => {
-                  setConventionalMode('rendered');
-                  setShowConventional(true);
-                }}
-                disabled={conventionalMode === 'rendered'}
-              >
-                Reset view mode
-              </button>
-              {conventionalMode === 'excerpt' && (
-                <>
-                  <label className="toggle">
-                    <input
-                      type="checkbox"
-                      checked={conventionalSeekEnabled}
-                      onChange={(event) => setConventionalSeekEnabled(event.target.checked)}
-                      disabled={!showConventional}
-                    />
-                    <span>Scroll to seek</span>
-                  </label>
-                  <label className="toggle">
-                    <input
-                      type="checkbox"
-                      checked={autoFollowConventional}
-                      onChange={(event) => setAutoFollowConventional(event.target.checked)}
-                      disabled={!showConventional}
-                    />
-                    <span>Auto-follow</span>
-                  </label>
-                </>
-              )}
-            </div>
-            {showConventional && conventionalMode === 'excerpt' && (
-              <p className="hint">Scrolling the excerpt moves the reader to the word near the top edge.</p>
-            )}
-            {showConventional && conventionalMode === 'rendered' && (
-              <p className="hint">Rendered view is read-only. Switch to Excerpt to scroll/seek.</p>
-            )}
-          </div>
-
           {showConventional && conventionalMode === 'excerpt' && (
             <ConventionalExcerpt
               ref={conventionalRef}
@@ -4376,6 +4314,65 @@ function App() {
           )}
           {showConventional && conventionalMode === 'rendered' && (
             <ConventionalRendered ref={conventionalRef} content={renderedMarkdown} />
+          )}
+
+          <div className="toggle-row">
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={showConventional}
+                onChange={(event) => setShowConventional(event.target.checked)}
+              />
+              <span>Show view</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={conventionalMode === 'rendered'}
+                onChange={(event) => setConventionalMode(event.target.checked ? 'rendered' : 'excerpt')}
+                disabled={!showConventional}
+              />
+              <span>Rendered markdown</span>
+            </label>
+            <button
+              type="button"
+              className="ghost small"
+              onClick={() => {
+                setConventionalMode('rendered');
+                setShowConventional(true);
+              }}
+              disabled={conventionalMode === 'rendered'}
+            >
+              Reset view mode
+            </button>
+            {conventionalMode === 'excerpt' && (
+              <>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={conventionalSeekEnabled}
+                    onChange={(event) => setConventionalSeekEnabled(event.target.checked)}
+                    disabled={!showConventional}
+                  />
+                  <span>Scroll to seek</span>
+                </label>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={autoFollowConventional}
+                    onChange={(event) => setAutoFollowConventional(event.target.checked)}
+                    disabled={!showConventional}
+                  />
+                  <span>Auto-follow</span>
+                </label>
+              </>
+            )}
+          </div>
+          {showConventional && conventionalMode === 'excerpt' && (
+            <p className="hint">Scrolling the excerpt moves the reader to the word near the top edge.</p>
+          )}
+          {showConventional && conventionalMode === 'rendered' && (
+            <p className="hint">Rendered view is read-only. Switch to Excerpt to scroll/seek.</p>
           )}
 
           <div className="panel-header">
