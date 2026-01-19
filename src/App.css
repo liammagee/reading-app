@@ -21,110 +21,104 @@
 .hero {
   display: flex;
   justify-content: space-between;
-  align-items: flex-end;
-  gap: 24px;
+  align-items: center;
+  gap: 16px;
   max-width: 100%;
-  overflow: hidden;
-}
-
-.hero > div:first-child {
-  min-width: 0;
-  flex: 1;
 }
 
 .hero h1 {
-  margin: 8px 0 6px;
-  font-size: clamp(1.6rem, 5vw + 0.5rem, 3.4rem);
+  margin: 0;
+  font-size: clamp(1.4rem, 3vw + 0.8rem, 2.2rem);
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   font-family: var(--display-font);
-  overflow-wrap: break-word;
-  word-break: break-word;
-  max-width: 100%;
-}
-
-.kicker {
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.28em;
-  font-size: 0.7rem;
-  color: var(--ink-muted);
-  font-family: var(--deck-font);
-}
-
-.sub {
-  margin: 0;
-  max-width: min(520px, 100%);
-  color: var(--ink-muted);
+  flex-shrink: 0;
 }
 
 .hero-actions {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
-.view-switcher {
-  display: grid;
-  gap: 6px;
-  align-items: center;
-}
-
-.view-switcher span {
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: var(--ink-muted);
-  font-family: var(--deck-font);
+.session-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
 }
 
 .view-toggle {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  padding: 4px;
-  border-radius: 999px;
-  background: rgba(18, 16, 14, 0.75);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.4);
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(18, 16, 14, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .view-toggle button {
   border: none;
   background: transparent;
-  color: rgba(244, 239, 228, 0.7);
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-size: 0.65rem;
+  color: rgba(244, 239, 228, 0.6);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 0.68rem;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.08em;
   font-family: var(--deck-font);
   cursor: pointer;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
 }
 
 .view-toggle button.active {
   color: #fff;
-  background: linear-gradient(145deg, #ff8a5a, #e4572e);
-  box-shadow: 0 10px 18px rgba(228, 87, 46, 0.4);
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .view-toggle button:hover:not(.active) {
-  transform: translateY(-1px);
+  color: rgba(244, 239, 228, 0.85);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .status-pill {
-  padding: 6px 12px;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  background: rgba(18, 16, 14, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  box-shadow: 0 10px 24px rgba(12, 10, 8, 0.18);
-  color: #f4efe4;
+  display: flex;
+  align-items: center;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 0.68rem;
+  background: rgba(18, 16, 14, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(244, 239, 228, 0.7);
   font-family: var(--deck-font);
-  letter-spacing: 0.18em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
+}
+
+.reset-btn {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-family: var(--deck-font);
+  background: linear-gradient(145deg, #ff8a5a, #e4572e);
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 4px 12px rgba(228, 87, 46, 0.3);
+}
+
+.reset-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(228, 87, 46, 0.4);
 }
 
 .app-shell.view-mobile .layout,
@@ -1876,17 +1870,27 @@
 }
 
 @media (max-width: 720px) {
-  .hero-actions {
+  .hero {
     flex-wrap: wrap;
+    gap: 12px;
   }
 
-  .view-switcher {
+  .hero-actions {
     width: 100%;
+    justify-content: space-between;
   }
 
   .view-toggle {
-    grid-template-columns: 1fr;
-    border-radius: 16px;
+    flex: 1;
+  }
+
+  .view-toggle button {
+    padding: 8px 10px;
+    font-size: 0.62rem;
+  }
+
+  .session-actions {
+    flex-shrink: 0;
   }
 
   .layout {
@@ -2127,23 +2131,43 @@
   }
 
   .hero {
-    gap: 16px;
+    gap: 10px;
   }
 
   .hero h1 {
-    font-size: clamp(1.4rem, 6vw, 2rem);
-    letter-spacing: 0.02em;
+    font-size: 1.3rem;
+    letter-spacing: 0.04em;
+  }
+
+  .hero-actions {
+    gap: 6px;
   }
 
   .view-toggle {
-    width: 100%;
-    max-width: 100%;
+    padding: 2px;
+    border-radius: 8px;
   }
 
   .view-toggle button {
-    padding: 10px 8px;
-    font-size: 0.6rem;
-    min-height: 44px;
+    padding: 6px 8px;
+    font-size: 0.58rem;
+    border-radius: 6px;
+  }
+
+  .session-actions {
+    gap: 6px;
+  }
+
+  .status-pill {
+    padding: 6px 10px;
+    font-size: 0.58rem;
+    border-radius: 8px;
+  }
+
+  .reset-btn {
+    padding: 6px 12px;
+    font-size: 0.62rem;
+    border-radius: 8px;
   }
 
   .deck-panel {
@@ -2160,11 +2184,6 @@
 
   .deck-controls .deck-btn.primary {
     font-size: 0.88rem;
-  }
-
-  .status-pill {
-    font-size: 0.68rem;
-    padding: 8px 12px;
   }
 
   .reader-display {
@@ -2210,8 +2229,36 @@
   }
 
   .hero h1 {
-    font-size: 1.3rem;
-    letter-spacing: 0.01em;
+    font-size: 1.1rem;
+  }
+
+  .hero-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .view-toggle {
+    order: 2;
+  }
+
+  .session-actions {
+    order: 1;
+    justify-content: space-between;
+  }
+
+  .view-toggle button {
+    font-size: 0.52rem;
+    padding: 5px 6px;
+  }
+
+  .status-pill {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .reset-btn {
+    flex: 1;
+    justify-content: center;
   }
 
   .panel {
@@ -2222,19 +2269,5 @@
   .deck-controls .deck-btn {
     min-height: 64px;
     font-size: 0.72rem;
-  }
-
-  .view-toggle button {
-    font-size: 0.55rem;
-    padding: 8px 6px;
-  }
-
-  .kicker {
-    font-size: 0.6rem;
-    letter-spacing: 0.2em;
-  }
-
-  .sub {
-    font-size: 0.9rem;
   }
 }

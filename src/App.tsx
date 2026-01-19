@@ -161,7 +161,7 @@ type TesseractWorker = import('tesseract.js').Worker;
 
 const DEFAULT_TEXT = `Paste a passage to begin.
 
-Focus Reader flashes one word at a time so you can increase speed while staying attentive. Try adjusting the WPM slider or chunk size, then hit Start.
+Pacer flashes one word at a time so you can increase speed while staying attentive. Try adjusting the WPM slider or chunk size, then hit Start.
 `;
 const CONVENTIONAL_MODE_KEY = 'reader:conventionalMode';
 const LAST_DOCUMENT_KEY = 'reader:lastDocument';
@@ -3584,57 +3584,50 @@ function App() {
         </div>
       )}
       <header className="hero">
-        <div>
-          <p className="kicker">Reading Lab</p>
-          <h1>Focus Reader</h1>
-          <p className="sub">
-            Speed reading with memory, DJ-style controls, and a future hermeneutics companion.
-          </p>
-        </div>
+        <h1>Pacer</h1>
         <div className="hero-actions">
-          <div className="view-switcher">
-            <span>View</span>
-            <div className="view-toggle" role="group" aria-label="View options">
-              <button
-                type="button"
-                className={viewMode === 'deck' ? 'active' : ''}
-                onClick={() => handleViewModeChange('deck')}
-              >
-                Full Deck
-              </button>
-              <button
-                type="button"
-                className={viewMode === 'mobile' ? 'active' : ''}
-                onClick={() => handleViewModeChange('mobile')}
-              >
-                Mobile
-              </button>
-              <button
-                type="button"
-                className={viewMode === 'focus' ? 'active' : ''}
-                onClick={() => handleViewModeChange('focus', { requestFullscreen: true })}
-              >
-                Full Screen
-              </button>
-              <button
-                type="button"
-                className={viewMode === 'focus-text' ? 'active' : ''}
-                onClick={() => handleViewModeChange('focus-text', { requestFullscreen: true })}
-              >
-                Full Screen + Text
-              </button>
-            </div>
+          <div className="view-toggle" role="group" aria-label="View options">
+            <button
+              type="button"
+              className={viewMode === 'deck' ? 'active' : ''}
+              onClick={() => handleViewModeChange('deck')}
+            >
+              Deck
+            </button>
+            <button
+              type="button"
+              className={viewMode === 'mobile' ? 'active' : ''}
+              onClick={() => handleViewModeChange('mobile')}
+            >
+              Stack
+            </button>
+            <button
+              type="button"
+              className={viewMode === 'focus' ? 'active' : ''}
+              onClick={() => handleViewModeChange('focus', { requestFullscreen: true })}
+            >
+              Focus
+            </button>
+            <button
+              type="button"
+              className={viewMode === 'focus-text' ? 'active' : ''}
+              onClick={() => handleViewModeChange('focus-text', { requestFullscreen: true })}
+            >
+              Focus+
+            </button>
           </div>
-          <span className="status-pill">Local session</span>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => {
-              handleSeek(0, { pause: true });
-            }}
-          >
-            Reset
-          </button>
+          <div className="session-actions">
+            <span className="status-pill">Local</span>
+            <button
+              type="button"
+              className="reset-btn"
+              onClick={() => {
+                handleSeek(0, { pause: true });
+              }}
+            >
+              Reset
+            </button>
+          </div>
         </div>
       </header>
 
