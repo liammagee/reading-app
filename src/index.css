@@ -1,5 +1,9 @@
 :root {
-  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  --body-font: 'Space Grotesk', 'Segoe UI', sans-serif;
+  --display-font: 'Orbitron', 'Space Grotesk', sans-serif;
+  --deck-font: 'Rajdhani', 'Space Grotesk', sans-serif;
+  --serif-font: 'Literata', serif;
+  font-family: var(--body-font);
   line-height: 1.5;
   font-weight: 400;
   color: #1b1a15;
@@ -13,9 +17,9 @@
   --ink-muted: #4b463f;
   --paper: #f5f1e8;
   --paper-strong: #ede6d6;
-  --accent: #e4572e;
-  --accent-soft: #f6bfa5;
-  --sky: #dbe6e2;
+  --accent: #ff6b3d;
+  --accent-soft: #f6b08f;
+  --sky: #d2e0db;
   --panel: rgba(255, 255, 255, 0.76);
   --panel-border: rgba(27, 26, 21, 0.12);
   --shadow: rgba(20, 18, 12, 0.16);
@@ -29,7 +33,10 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: radial-gradient(circle at top, #f8f4ea 0%, #dbe6e2 60%, #f5f1e8 100%);
+  background:
+    radial-gradient(circle at 15% 20%, rgba(255, 234, 206, 0.9), transparent 45%),
+    radial-gradient(circle at 80% 0%, rgba(255, 180, 120, 0.25), transparent 35%),
+    linear-gradient(140deg, #f8f2e6 0%, #d8e0db 55%, #f5f1e8 100%);
   color: var(--ink);
 }
 
@@ -40,8 +47,9 @@ body::before {
   pointer-events: none;
   background-image:
     linear-gradient(120deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0)),
-    repeating-linear-gradient(90deg, rgba(27, 26, 21, 0.05) 0 1px, transparent 1px 28px);
-  opacity: 0.6;
+    repeating-linear-gradient(90deg, rgba(27, 26, 21, 0.05) 0 1px, transparent 1px 28px),
+    repeating-linear-gradient(0deg, rgba(27, 26, 21, 0.04) 0 1px, transparent 1px 26px);
+  opacity: 0.55;
   z-index: 0;
 }
 

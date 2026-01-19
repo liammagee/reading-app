@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import type { FaceLandmarker, HandLandmarker } from '@mediapipe/tasks-vision';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
@@ -53,20 +54,17 @@ type SavedSession = {
 
 type LastDocument = {
   sourceText: string;
-  secondaryText?: string;
   title?: string;
   sourceKind?: 'text' | 'pdf';
   primaryFileMeta?: FileMeta | null;
-  secondaryFileMeta?: FileMeta | null;
-  primaryLanguage?: string;
-  secondaryLanguage?: string;
 };
 
 type UserPreferences = {
   showConventional?: boolean;
   conventionalSeekEnabled?: boolean;
   autoFollowConventional?: boolean;
-  showBilingual?: boolean;
+  audioCuesEnabled?: boolean;
+  viewMode?: ViewMode;
   cameraEnabled?: boolean;
   cameraHandEnabled?: boolean;
   cameraEyeEnabled?: boolean;
@@ -83,6 +81,8 @@ type PageRange = {
   end: number;
 };
 
+type ViewMode = 'deck' | 'mobile' | 'focus' | 'focus-text';
+
 type FileMeta = {
   name: string;
   size: number;
@@ -94,6 +94,13 @@ type PdfOutlineItem = {
   pageNumber: number | null;
   url?: string;
   items: PdfOutlineItem[];
+};
+
+type PdfOutlineNode = {
+  title?: string;
+  dest?: unknown;
+  url?: string;
+  items?: PdfOutlineNode[];
 };
 
 type PdfState = {
@@ -127,6 +134,43 @@ type NormalizedLandmark = {
   z?: number;
 };
 
+type AwardKind = 'words' | 'time' | 'progress';
+
+type AwardDefinition = {
+  id: string;
+  label: string;
+  detail: string;
+  kind: AwardKind;
+  threshold: number;
+};
+
+type AwardStatus = AwardDefinition & {
+  value: number;
+  earned: boolean;
+};
+
+type IdleDeadline = {
+  didTimeout: boolean;
+  timeRemaining: () => number;
+};
+
+type IdleCallback = (deadline: IdleDeadline) => void;
+
+type IdleRequestOptions = {
+  timeout?: number;
+};
+
+type IdleCallbackHandle = number;
+
+type TesseractWorker = import('tesseract.js').Worker;
+
+declare global {
+  interface Window {
+    requestIdleCallback?: (callback: IdleCallback, options?: IdleRequestOptions) => IdleCallbackHandle;
+    cancelIdleCallback?: (handle: IdleCallbackHandle) => void;
+  }
+}
+
 const DEFAULT_TEXT = `Paste a passage to begin.
 
 Focus Reader flashes one word at a time so you can increase speed while staying attentive. Try adjusting the WPM slider or chunk size, then hit Start.
@@ -142,6 +186,16 @@ const CONVENTIONAL_BUFFER_CHUNKS = 2;
 const DEFAULT_CONVENTIONAL_CHUNK_HEIGHT = 240;
 const LEFT_EYE_LANDMARKS = [33, 160, 158, 133, 153, 144] as const;
 const RIGHT_EYE_LANDMARKS = [362, 385, 387, 263, 373, 380] as const;
+
+const AWARD_DEFINITIONS: AwardDefinition[] = [
+  { id: 'warmup', label: 'Warm-up', detail: '250 words', kind: 'words', threshold: 250 },
+  { id: 'stride', label: 'Stride', detail: '1k words', kind: 'words', threshold: 1000 },
+  { id: 'deep', label: 'Deep read', detail: '3k words', kind: 'words', threshold: 3000 },
+  { id: 'focus', label: 'Focus', detail: '10 min', kind: 'time', threshold: 10 * 60 * 1000 },
+  { id: 'endurance', label: 'Endurance', detail: '30 min', kind: 'time', threshold: 30 * 60 * 1000 },
+  { id: 'halfway', label: 'Halfway', detail: '50%', kind: 'progress', threshold: 50 },
+  { id: 'finish', label: 'Finish', detail: '100%', kind: 'progress', threshold: 100 },
+];
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -198,6 +252,13 @@ const getSteppedWordIndex = (
   const nextSegmentIndex = clamp(segmentIndex + delta, 0, Math.max(0, segments.length - 1));
   const nextSegment = segments[nextSegmentIndex];
   return nextSegment ? nextSegment.startIndex : currentIndex;
+};
+
+const isEditableTarget = (target: EventTarget | null) => {
+  if (!target || !(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tagName = target.tagName;
+  return tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT';
 };
 
 const distance = (a: NormalizedLandmark, b: NormalizedLandmark) =>
@@ -433,20 +494,18 @@ const buildRangeText = (
 
 const scheduleIdle = (callback: () => void, timeout = 1200) => {
   if (typeof window === 'undefined') return null;
-  const idle = (window as any).requestIdleCallback as
-    | ((cb: () => void, options?: { timeout: number }) => number)
-    | undefined;
-  if (typeof idle === 'function') {
-    return idle(() => callback(), { timeout });
+  const { requestIdleCallback } = window;
+  if (typeof requestIdleCallback === 'function') {
+    return requestIdleCallback(() => callback(), { timeout });
   }
   return window.setTimeout(callback, Math.min(timeout, 600));
 };
 
 const cancelIdle = (id: number | null) => {
   if (typeof window === 'undefined' || id === null) return;
-  const cancel = (window as any).cancelIdleCallback as ((handle: number) => void) | undefined;
-  if (typeof cancel === 'function') {
-    cancel(id);
+  const { cancelIdleCallback } = window;
+  if (typeof cancelIdleCallback === 'function') {
+    cancelIdleCallback(id);
     return;
   }
   window.clearTimeout(id);
@@ -476,7 +535,7 @@ const extractPdfDataMainThread = async (
     }
 
     const outline = await (async () => {
-      const rawOutline = await pdf.getOutline();
+      const rawOutline = (await pdf.getOutline()) as PdfOutlineNode[] | null;
       if (!rawOutline) return [] as PdfOutlineItem[];
 
       const resolveDest = async (dest: unknown) => {
@@ -491,7 +550,7 @@ const extractPdfDataMainThread = async (
         }
       };
 
-      const mapItems = async (items: any[]): Promise<PdfOutlineItem[]> => {
+      const mapItems = async (items: PdfOutlineNode[]): Promise<PdfOutlineItem[]> => {
         const mapped: PdfOutlineItem[] = [];
         for (const item of items) {
           const pageNumber = await resolveDest(item.dest);
@@ -523,11 +582,7 @@ const extractPdfDataMainThread = async (
 function App() {
   const [title, setTitle] = useState('Untitled Session');
   const [sourceText, setSourceText] = useState(DEFAULT_TEXT);
-  const [secondaryText, setSecondaryText] = useState('');
-  const [primaryLanguage, setPrimaryLanguage] = useState('English');
-  const [secondaryLanguage, setSecondaryLanguage] = useState('German');
   const [primaryFileMeta, setPrimaryFileMeta] = useState<FileMeta | null>(null);
-  const [secondaryFileMeta, setSecondaryFileMeta] = useState<FileMeta | null>(null);
   const [wpm, setWpm] = useState(320);
   const [chunkSize, setChunkSize] = useState(1);
   const [granularity, setGranularity] = useState<Granularity>('word');
@@ -537,6 +592,8 @@ function App() {
   const [sessionElapsedMs, setSessionElapsedMs] = useState(0);
   const [wordIndex, setWordIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [showHotkeys, setShowHotkeys] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>('deck');
   const [showConventional, setShowConventional] = useState(true);
   const [conventionalMode, setConventionalMode] = useState<'excerpt' | 'rendered'>(() => {
     if (typeof window === 'undefined') return 'rendered';
@@ -571,9 +628,8 @@ function App() {
   const [ttsChecking, setTtsChecking] = useState(false);
   const [conventionalSeekEnabled, setConventionalSeekEnabled] = useState(true);
   const [autoFollowConventional, setAutoFollowConventional] = useState(true);
-  const [showBilingual, setShowBilingual] = useState(true);
+  const [audioCuesEnabled, setAudioCuesEnabled] = useState(true);
   const [primaryNotice, setPrimaryNotice] = useState<Notice | null>(null);
-  const [secondaryNotice, setSecondaryNotice] = useState<Notice | null>(null);
   const [cameraEnabled, setCameraEnabled] = useState(false);
   const [cameraHandEnabled, setCameraHandEnabled] = useState(true);
   const [cameraEyeEnabled, setCameraEyeEnabled] = useState(true);
@@ -586,20 +642,17 @@ function App() {
   const [findQuery, setFindQuery] = useState('');
   const [findCursor, setFindCursor] = useState(0);
   const [tokens, setTokens] = useState<string[]>([]);
-  const [secondaryTokens, setSecondaryTokens] = useState<string[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
-  const [secondarySegments, setSecondarySegments] = useState<Segment[]>([]);
   const [findMatches, setFindMatches] = useState<number[]>([]);
   const [workerReady, setWorkerReady] = useState(false);
   const [workerNonce, setWorkerNonce] = useState(0);
   const [workerFallbackNonce, setWorkerFallbackNonce] = useState(0);
   const [workerNotice, setWorkerNotice] = useState<Notice | null>(null);
   const [isIndexingPrimary, setIsIndexingPrimary] = useState(false);
-  const [isIndexingSecondary, setIsIndexingSecondary] = useState(false);
   const [isFinding, setIsFinding] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const deferredSourceText = useDeferredValue(sourceText);
-  const deferredSecondaryText = useDeferredValue(secondaryText);
   const deferredFindQuery = useDeferredValue(findQuery);
   const renderedSourceText = deferredSourceText;
   const canUseWorker = typeof Worker !== 'undefined';
@@ -634,22 +687,6 @@ function App() {
     const end = last.startIndex + Math.max(1, last.wordCount) - 1;
     return { start, end };
   }, [currentSegments]);
-  const secondarySegmentIndex = useMemo(() => {
-    if (!secondarySegments.length) return 0;
-    if (!segments.length) return 0;
-    if (granularity === 'sentence') {
-      return clamp(segmentIndex, 0, secondarySegments.length - 1);
-    }
-    const ratio = segmentIndex / Math.max(1, segments.length - 1);
-    return clamp(Math.round(ratio * (secondarySegments.length - 1)), 0, secondarySegments.length - 1);
-  }, [granularity, segmentIndex, segments.length, secondarySegments.length]);
-  const secondarySegmentChunkText = useMemo(() => {
-    if (!secondarySegments.length) return '';
-    const start = secondarySegmentIndex;
-    const end = Math.min(secondarySegments.length, start + chunkSize);
-    return secondarySegments.slice(start, end).map((segment) => segment.text).join(' ');
-  }, [chunkSize, secondarySegmentIndex, secondarySegments]);
-  const bilingualReady = secondaryText.trim().length > 0 && secondarySegments.length > 0;
   const docKey = useMemo(() => {
     if (sourceKind === 'pdf' && primaryFileMeta) {
       return `reader:pdf:${primaryFileMeta.name}:${primaryFileMeta.size}:${primaryFileMeta.lastModified}`;
@@ -668,11 +705,8 @@ function App() {
   const textWorkerRef = useRef<Worker | null>(null);
   const textWorkerIdRef = useRef(0);
   const primaryDocIdRef = useRef(0);
-  const secondaryDocIdRef = useRef(0);
   const primaryDocReadyRef = useRef(false);
-  const secondaryDocReadyRef = useRef(false);
   const pendingPrimarySegmentRef = useRef(false);
-  const pendingSecondarySegmentRef = useRef(false);
   const findQueryRef = useRef('');
   const granularityRef = useRef<Granularity>('word');
   const workerRestartTimerRef = useRef<number | null>(null);
@@ -701,6 +735,9 @@ function App() {
   const ttsIntervalRef = useRef<number | null>(null);
   const ttsEnabledRef = useRef(false);
   const ttsPlayingRef = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioCuesEnabledRef = useRef(true);
+  const audioCueLastAtRef = useRef(0);
   const ttsConfigRef = useRef({
     voice: 'sarah',
     speed: 1.0,
@@ -731,11 +768,12 @@ function App() {
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const cameraRafRef = useRef<number | null>(null);
-  const handLandmarkerRef = useRef<any>(null);
-  const faceLandmarkerRef = useRef<any>(null);
+  const handLandmarkerRef = useRef<HandLandmarker | null>(null);
+  const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
   const handleSeekRef = useRef<
     (index: number, options?: { pause?: boolean; focusConventional?: boolean; scrollBehavior?: ScrollBehavior }) => void
   >(() => {});
+  const handleBookmarkRef = useRef<() => void>(() => {});
   const handHistoryRef = useRef<Array<{ x: number; t: number }>>([]);
   const blinkStartRef = useRef<number | null>(null);
   const blinkLockedRef = useRef(false);
@@ -760,6 +798,10 @@ function App() {
   useEffect(() => {
     ttsPlayingRef.current = isPlaying;
   }, [isPlaying]);
+
+  useEffect(() => {
+    audioCuesEnabledRef.current = audioCuesEnabled;
+  }, [audioCuesEnabled]);
 
   useEffect(() => {
     isPlayingRef.current = isPlaying;
@@ -816,6 +858,27 @@ function App() {
   }, [granularity, segmentStartIndices, segments, tokens]);
 
   useEffect(() => {
+    return () => {
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+        audioContextRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const handleChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleChange);
+    handleChange();
+    return () => {
+      document.removeEventListener('fullscreenchange', handleChange);
+    };
+  }, []);
+
+  useEffect(() => {
     if (typeof window === 'undefined') return;
     const encoded = readBookmarkParam(window.location.href);
     if (!encoded) return;
@@ -860,66 +923,39 @@ function App() {
       if (data.type === 'analyze-result') {
         const payload = data as {
           docId: number;
-          kind: 'primary' | 'secondary';
+          kind: 'primary';
           tokens: string[];
           segments: Segment[];
         };
-        if (payload.kind === 'primary') {
-          if (payload.docId !== primaryDocIdRef.current) return;
-          primaryDocReadyRef.current = true;
-          setIsIndexingPrimary(false);
-          setTokens(payload.tokens);
-          if (pendingPrimarySegmentRef.current) {
-            pendingPrimarySegmentRef.current = false;
-            const requestId = ++textWorkerIdRef.current;
-            setIsIndexingPrimary(true);
-            worker.postMessage({
-              type: 'segment',
-              id: requestId,
-              docId: payload.docId,
-              kind: 'primary',
-              granularity: granularityRef.current,
-            });
-          } else {
-            setSegments(payload.segments);
-          }
+        if (payload.docId !== primaryDocIdRef.current) return;
+        primaryDocReadyRef.current = true;
+        setIsIndexingPrimary(false);
+        setTokens(payload.tokens);
+        if (pendingPrimarySegmentRef.current) {
+          pendingPrimarySegmentRef.current = false;
+          const requestId = ++textWorkerIdRef.current;
+          setIsIndexingPrimary(true);
+          worker.postMessage({
+            type: 'segment',
+            id: requestId,
+            docId: payload.docId,
+            kind: 'primary',
+            granularity: granularityRef.current,
+          });
         } else {
-          if (payload.docId !== secondaryDocIdRef.current) return;
-          secondaryDocReadyRef.current = true;
-          setIsIndexingSecondary(false);
-          setSecondaryTokens(payload.tokens);
-          if (pendingSecondarySegmentRef.current) {
-            pendingSecondarySegmentRef.current = false;
-            const requestId = ++textWorkerIdRef.current;
-            setIsIndexingSecondary(true);
-            worker.postMessage({
-              type: 'segment',
-              id: requestId,
-              docId: payload.docId,
-              kind: 'secondary',
-              granularity: granularityRef.current,
-            });
-          } else {
-            setSecondarySegments(payload.segments);
-          }
+          setSegments(payload.segments);
         }
         return;
       }
       if (data.type === 'segment-result') {
         const payload = data as {
           docId: number;
-          kind: 'primary' | 'secondary';
+          kind: 'primary';
           segments: Segment[];
         };
-        if (payload.kind === 'primary') {
-          if (payload.docId !== primaryDocIdRef.current) return;
-          setIsIndexingPrimary(false);
-          setSegments(payload.segments);
-        } else {
-          if (payload.docId !== secondaryDocIdRef.current) return;
-          setIsIndexingSecondary(false);
-          setSecondarySegments(payload.segments);
-        }
+        if (payload.docId !== primaryDocIdRef.current) return;
+        setIsIndexingPrimary(false);
+        setSegments(payload.segments);
         return;
       }
       if (data.type === 'find-result') {
@@ -982,12 +1018,6 @@ function App() {
   }, [deferredSourceText]);
 
   useEffect(() => {
-    secondaryDocReadyRef.current = false;
-    pendingSecondarySegmentRef.current = false;
-    secondaryDocIdRef.current += 1;
-  }, [deferredSecondaryText]);
-
-  useEffect(() => {
     const docId = primaryDocIdRef.current;
     if (!deferredSourceText.trim()) {
       setIsIndexingPrimary(false);
@@ -1021,38 +1051,6 @@ function App() {
   }, [canUseWorker, deferredSourceText, workerFallbackNonce, workerReady]);
 
   useEffect(() => {
-    const docId = secondaryDocIdRef.current;
-    if (!deferredSecondaryText.trim()) {
-      setIsIndexingSecondary(false);
-      setSecondaryTokens([]);
-      setSecondarySegments([]);
-      return;
-    }
-    if (!canUseWorker || !workerReady || !textWorkerRef.current) {
-      setIsIndexingSecondary(true);
-      const nextTokens = tokenize(deferredSecondaryText);
-      setSecondaryTokens(nextTokens);
-      const nextSegments =
-        granularityRef.current === 'sentence'
-          ? segmentTextBySentence(deferredSecondaryText)
-          : segmentTokens(nextTokens, granularityRef.current);
-      setSecondarySegments(nextSegments);
-      setIsIndexingSecondary(false);
-      return;
-    }
-    setIsIndexingSecondary(true);
-    const requestId = ++textWorkerIdRef.current;
-    textWorkerRef.current.postMessage({
-      type: 'analyze',
-      id: requestId,
-      docId,
-      kind: 'secondary',
-      text: deferredSecondaryText,
-      granularity: granularityRef.current,
-    });
-  }, [canUseWorker, deferredSecondaryText, workerFallbackNonce, workerReady]);
-
-  useEffect(() => {
     if (!deferredSourceText.trim()) {
       setSegments([]);
       return;
@@ -1082,35 +1080,6 @@ function App() {
     setIsIndexingPrimary(false);
   }, [canUseWorker, deferredSourceText, granularity, tokens, workerReady]);
 
-  useEffect(() => {
-    if (!deferredSecondaryText.trim()) {
-      setSecondarySegments([]);
-      return;
-    }
-    if (canUseWorker && workerReady && textWorkerRef.current) {
-      if (secondaryDocReadyRef.current) {
-        const requestId = ++textWorkerIdRef.current;
-        setIsIndexingSecondary(true);
-        textWorkerRef.current.postMessage({
-          type: 'segment',
-          id: requestId,
-          docId: secondaryDocIdRef.current,
-          kind: 'secondary',
-          granularity,
-        });
-        return;
-      }
-      pendingSecondarySegmentRef.current = true;
-    }
-    if (!secondaryTokens.length) return;
-    setIsIndexingSecondary(true);
-    const nextSegments =
-      granularity === 'sentence'
-        ? segmentTextBySentence(deferredSecondaryText)
-        : segmentTokens(secondaryTokens, granularity);
-    setSecondarySegments(nextSegments);
-    setIsIndexingSecondary(false);
-  }, [canUseWorker, deferredSecondaryText, granularity, secondaryTokens, workerReady]);
 
   useEffect(() => {
     if (!deferredFindQuery.trim() || !tokens.length) {
@@ -1156,7 +1125,7 @@ function App() {
     }
     setFindMatches(matches);
     setIsFinding(false);
-  }, [canUseWorker, deferredFindQuery, tokens.length, workerReady]);
+  }, [canUseWorker, deferredFindQuery, tokens, workerReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1178,9 +1147,6 @@ function App() {
       if (typeof parsed.sourceText === 'string') {
         setSourceText(parsed.sourceText);
       }
-      if (typeof parsed.secondaryText === 'string') {
-        setSecondaryText(parsed.secondaryText);
-      }
       if (typeof parsed.title === 'string' && parsed.title.trim()) {
         setTitle(parsed.title);
       }
@@ -1194,20 +1160,6 @@ function App() {
         typeof parsed.primaryFileMeta.lastModified === 'number'
       ) {
         setPrimaryFileMeta(parsed.primaryFileMeta);
-      }
-      if (
-        parsed.secondaryFileMeta &&
-        typeof parsed.secondaryFileMeta.name === 'string' &&
-        typeof parsed.secondaryFileMeta.size === 'number' &&
-        typeof parsed.secondaryFileMeta.lastModified === 'number'
-      ) {
-        setSecondaryFileMeta(parsed.secondaryFileMeta);
-      }
-      if (typeof parsed.primaryLanguage === 'string' && parsed.primaryLanguage.trim()) {
-        setPrimaryLanguage(parsed.primaryLanguage);
-      }
-      if (typeof parsed.secondaryLanguage === 'string' && parsed.secondaryLanguage.trim()) {
-        setSecondaryLanguage(parsed.secondaryLanguage);
       }
     };
     hydrate()
@@ -1242,8 +1194,16 @@ function App() {
       if (typeof parsed.autoFollowConventional === 'boolean') {
         setAutoFollowConventional(parsed.autoFollowConventional);
       }
-      if (typeof parsed.showBilingual === 'boolean') {
-        setShowBilingual(parsed.showBilingual);
+      if (typeof parsed.audioCuesEnabled === 'boolean') {
+        setAudioCuesEnabled(parsed.audioCuesEnabled);
+      }
+      if (
+        parsed.viewMode === 'deck' ||
+        parsed.viewMode === 'mobile' ||
+        parsed.viewMode === 'focus' ||
+        parsed.viewMode === 'focus-text'
+      ) {
+        setViewMode(parsed.viewMode);
       }
       if (typeof parsed.cameraEnabled === 'boolean') {
         setCameraEnabled(parsed.cameraEnabled);
@@ -1280,7 +1240,8 @@ function App() {
           showConventional,
           conventionalSeekEnabled,
           autoFollowConventional,
-          showBilingual,
+          audioCuesEnabled,
+          viewMode,
           cameraEnabled,
           cameraHandEnabled,
           cameraEyeEnabled,
@@ -1304,13 +1265,14 @@ function App() {
     };
   }, [
     autoFollowConventional,
+    audioCuesEnabled,
     cameraEnabled,
     cameraEyeEnabled,
     cameraHandEnabled,
     cameraPreview,
     conventionalSeekEnabled,
     showConventional,
-    showBilingual,
+    viewMode,
   ]);
 
   useEffect(() => {
@@ -1327,13 +1289,9 @@ function App() {
       lastDocIdleRef.current = scheduleIdle(() => {
         const payload: LastDocument = {
           sourceText,
-          secondaryText,
           title,
           sourceKind,
           primaryFileMeta,
-          secondaryFileMeta,
-          primaryLanguage,
-          secondaryLanguage,
         };
         let storedLocally = false;
         try {
@@ -1361,7 +1319,7 @@ function App() {
         lastDocIdleRef.current = null;
       }
     };
-  }, [primaryFileMeta, primaryLanguage, secondaryFileMeta, secondaryLanguage, sourceKind, secondaryText, sourceText, title]);
+  }, [primaryFileMeta, sourceKind, sourceText, title]);
 
   useEffect(() => {
     if (!cameraEnabled) {
@@ -1648,32 +1606,6 @@ function App() {
   }, [activeSegmentRange, conventionalMode, conventionalWindow, showConventional, tokens.length]);
 
   useEffect(() => {
-    if (!autoFollowConventional || !showConventional || !isPlaying || conventionalMode !== 'excerpt') return;
-    const container = conventionalRef.current;
-    if (!container) return;
-    const activeWord = container.querySelector(`[data-word-index="${wordIndex}"]`) as HTMLElement | null;
-    if (!activeWord) {
-      scrollConventionalToIndex(wordIndex, 'auto');
-      return;
-    }
-    if (autoFollowRafRef.current) return;
-    autoFollowRafRef.current = window.requestAnimationFrame(() => {
-      autoFollowRafRef.current = null;
-      const rect = container.getBoundingClientRect();
-      const wordRect = activeWord.getBoundingClientRect();
-      const margin = Math.min(80, rect.height * 0.2);
-      if (wordRect.top < rect.top + margin || wordRect.bottom > rect.bottom - margin) {
-        const targetTop = container.scrollTop + (wordRect.top - rect.top) - rect.height / 2 + wordRect.height / 2;
-        scrollLockRef.current = true;
-        container.scrollTo({ top: targetTop, behavior: 'smooth' });
-        window.setTimeout(() => {
-          scrollLockRef.current = false;
-        }, 120);
-      }
-    });
-  }, [autoFollowConventional, conventionalMode, showConventional, isPlaying, wordIndex]);
-
-  useEffect(() => {
     if (ttsAvailable === false && ttsEnabled) {
       setTtsEnabled(false);
     }
@@ -1863,7 +1795,7 @@ function App() {
   const conventionalOffsets = useMemo(() => {
     if (conventionalChunkCount === 0) return [0];
     const offsets = new Array(conventionalChunkCount + 1);
-    offsets[0] = 0;
+    offsets[0] = conventionalLayoutVersion * 0;
     for (let i = 0; i < conventionalChunkCount; i += 1) {
       offsets[i + 1] = offsets[i] + getConventionalChunkHeight(i);
     }
@@ -2159,6 +2091,36 @@ function App() {
 
   const sessionPercent = tokens.length ? Math.round((wordsRead / tokens.length) * 100) : 0;
   const sessionDurationLabel = useMemo(() => formatDuration(sessionElapsedMs), [sessionElapsedMs]);
+  const sessionWordCount = wordsRead;
+  const totalWordCount = tokens.length;
+  const sessionWordPairLabel = totalWordCount
+    ? `${sessionWordCount.toLocaleString()} / ${totalWordCount.toLocaleString()}`
+    : '0 / 0';
+  const awards = useMemo(() => {
+    const items: AwardStatus[] = AWARD_DEFINITIONS.map((award) => {
+      const value = award.kind === 'time'
+        ? sessionElapsedMs
+        : award.kind === 'progress'
+          ? sessionPercent
+          : sessionWordCount;
+      return { ...award, value, earned: value >= award.threshold };
+    });
+    const earnedCount = items.filter((item) => item.earned).length;
+    const nextAward = items.find((item) => !item.earned) ?? null;
+    return { items, earnedCount, total: items.length, nextAward };
+  }, [sessionElapsedMs, sessionPercent, sessionWordCount]);
+
+  const formatAwardRemaining = (award: AwardStatus) => {
+    const remaining = Math.max(0, award.threshold - award.value);
+    if (award.kind === 'time') {
+      return `${formatDuration(remaining)} left`;
+    }
+    if (award.kind === 'progress') {
+      return `${remaining}% to go`;
+    }
+    return `${remaining.toLocaleString()} words to go`;
+  };
+  const nextAwardRemaining = awards.nextAward ? formatAwardRemaining(awards.nextAward) : null;
 
   useEffect(() => {
     if (!tokens.length) {
@@ -2223,35 +2185,34 @@ function App() {
           : 'Sentence';
   const singleWordMode = granularity === 'word' && chunkSize === 1;
 
-  const applyPdfRange = (
-    start: number,
-    end: number,
-    options?: { focusPage?: number; pdfOverride?: PdfState },
-  ) => {
-    const activePdf = options?.pdfOverride ?? pdfState;
-    if (!activePdf) return;
-    const range = normalizeRange(start, end, activePdf.pageCount);
-    const { text, offsets } = buildRangeText(
-      activePdf.pageTexts,
-      activePdf.pageTokenCounts,
-      range.start,
-      range.end,
-    );
-    setSourceText(text);
-    setPageOffsets(offsets);
-    setPageRange(range);
-    setPageRangeDraft(range);
-    setIsPlaying(false);
-    if (options?.focusPage) {
-      const focus = clamp(options.focusPage, range.start, range.end);
-      const localIndex = focus - range.start;
-      setWordIndex(offsets[localIndex] ?? 0);
-    } else {
-      setWordIndex(0);
-    }
-  };
+  const applyPdfRange = useCallback(
+    (start: number, end: number, options?: { focusPage?: number; pdfOverride?: PdfState }) => {
+      const activePdf = options?.pdfOverride ?? pdfState;
+      if (!activePdf) return;
+      const range = normalizeRange(start, end, activePdf.pageCount);
+      const { text, offsets } = buildRangeText(
+        activePdf.pageTexts,
+        activePdf.pageTokenCounts,
+        range.start,
+        range.end,
+      );
+      setSourceText(text);
+      setPageOffsets(offsets);
+      setPageRange(range);
+      setPageRangeDraft(range);
+      setIsPlaying(false);
+      if (options?.focusPage) {
+        const focus = clamp(options.focusPage, range.start, range.end);
+        const localIndex = focus - range.start;
+        setWordIndex(offsets[localIndex] ?? 0);
+      } else {
+        setWordIndex(0);
+      }
+    },
+    [pdfState],
+  );
 
-  const buildTtsChunk = (startIndex: number) => {
+  const buildTtsChunk = useCallback((startIndex: number) => {
     const sourceTokens = tokensRef.current;
     if (startIndex >= sourceTokens.length) return null;
     const { chunkWords } = ttsConfigRef.current;
@@ -2278,7 +2239,7 @@ function App() {
       text: sourceTokens.slice(startIndex, endIndex).join(' '),
       wordsCount,
     };
-  };
+  }, []);
 
   const refreshTtsStatus = async () => {
     setTtsChecking(true);
@@ -2337,7 +2298,7 @@ function App() {
     setTtsEnabled(true);
   };
 
-  const stopTtsPlayback = (options?: { clearNotice?: boolean }) => {
+  const stopTtsPlayback = useCallback((options?: { clearNotice?: boolean }) => {
     if (ttsAbortRef.current) {
       ttsAbortRef.current.abort();
       ttsAbortRef.current = null;
@@ -2358,9 +2319,52 @@ function App() {
     if (options?.clearNotice) {
       setTtsNotice(null);
     }
-  };
+  }, []);
 
-  const startTtsFromIndex = async (startIndex: number) => {
+  const playCue = useCallback((tone: 'start' | 'pause' | 'back' | 'next' | 'bookmark') => {
+    if (!audioCuesEnabledRef.current) return;
+    if (typeof window === 'undefined') return;
+    const AudioContextCtor =
+      window.AudioContext ||
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) return;
+    const now = performance.now();
+    if (now - audioCueLastAtRef.current < 40) return;
+    audioCueLastAtRef.current = now;
+
+    const context = audioContextRef.current ?? new AudioContextCtor();
+    audioContextRef.current = context;
+    if (context.state === 'suspended') {
+      void context.resume().catch(() => {});
+    }
+
+    const cueMap = {
+      start: { freq: 520, duration: 0.09, gain: 0.08 },
+      pause: { freq: 260, duration: 0.09, gain: 0.07 },
+      back: { freq: 340, duration: 0.06, gain: 0.06 },
+      next: { freq: 640, duration: 0.06, gain: 0.06 },
+      bookmark: { freq: 760, duration: 0.12, gain: 0.07 },
+    };
+    const cue = cueMap[tone];
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const startTime = context.currentTime;
+    oscillator.type = 'triangle';
+    oscillator.frequency.setValueAtTime(cue.freq, startTime);
+    gain.gain.setValueAtTime(0.0001, startTime);
+    gain.gain.exponentialRampToValueAtTime(cue.gain, startTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + cue.duration);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(startTime);
+    oscillator.stop(startTime + cue.duration + 0.02);
+    oscillator.onended = () => {
+      oscillator.disconnect();
+      gain.disconnect();
+    };
+  }, []);
+
+  const startTtsFromIndex = useCallback(async (startIndex: number) => {
     stopTtsPlayback();
     if (ttsAvailable === false) {
       setTtsNotice({ kind: 'error', message: 'Lemonfox unavailable. Check server config.' });
@@ -2486,46 +2490,137 @@ function App() {
       setTtsNotice({ kind: 'error', message: 'Audio playback blocked.' });
       setIsPlaying(false);
     }
-  };
+  }, [buildTtsChunk, stopTtsPlayback, ttsAvailable]);
 
-  const scrollConventionalToIndex = (targetIndex: number, behavior: ScrollBehavior = 'smooth') => {
-    if (!showConventional) return;
+  const scrollConventionalToIndex = useCallback(
+    (targetIndex: number, behavior: ScrollBehavior = 'smooth') => {
+      if (!showConventional) return;
+      const container = conventionalRef.current;
+      if (!container) return;
+      if (tokens.length === 0) return;
+      if (conventionalMode === 'rendered') {
+        const ratio = tokens.length ? clamp(targetIndex / Math.max(1, tokens.length - 1), 0, 1) : 0;
+        const maxScroll = container.scrollHeight - container.clientHeight;
+        scrollLockRef.current = true;
+        container.scrollTo({ top: maxScroll * ratio, behavior });
+        window.setTimeout(() => {
+          scrollLockRef.current = false;
+        }, 120);
+        return;
+      }
+      if (conventionalMode !== 'excerpt') return;
+      pendingConventionalScrollRef.current = { index: targetIndex, behavior };
+      ensureConventionalWindowForIndex(targetIndex);
+    },
+    [conventionalMode, ensureConventionalWindowForIndex, showConventional, tokens.length],
+  );
+
+  useEffect(() => {
+    if (!autoFollowConventional || !showConventional || !isPlaying || conventionalMode !== 'excerpt') return;
     const container = conventionalRef.current;
     if (!container) return;
-    if (tokens.length === 0) return;
-    if (conventionalMode === 'rendered') {
-      const ratio = tokens.length ? clamp(targetIndex / Math.max(1, tokens.length - 1), 0, 1) : 0;
-      const maxScroll = container.scrollHeight - container.clientHeight;
-      scrollLockRef.current = true;
-      container.scrollTo({ top: maxScroll * ratio, behavior });
-      window.setTimeout(() => {
-        scrollLockRef.current = false;
-      }, 120);
+    const activeWord = container.querySelector(`[data-word-index="${wordIndex}"]`) as HTMLElement | null;
+    if (!activeWord) {
+      scrollConventionalToIndex(wordIndex, 'auto');
       return;
     }
-    if (conventionalMode !== 'excerpt') return;
-    pendingConventionalScrollRef.current = { index: targetIndex, behavior };
-    ensureConventionalWindowForIndex(targetIndex);
-  };
+    if (autoFollowRafRef.current) return;
+    autoFollowRafRef.current = window.requestAnimationFrame(() => {
+      autoFollowRafRef.current = null;
+      const rect = container.getBoundingClientRect();
+      const wordRect = activeWord.getBoundingClientRect();
+      const margin = Math.min(80, rect.height * 0.2);
+      if (wordRect.top < rect.top + margin || wordRect.bottom > rect.bottom - margin) {
+        const targetTop = container.scrollTop + (wordRect.top - rect.top) - rect.height / 2 + wordRect.height / 2;
+        scrollLockRef.current = true;
+        container.scrollTo({ top: targetTop, behavior: 'smooth' });
+        window.setTimeout(() => {
+          scrollLockRef.current = false;
+        }, 120);
+      }
+    });
+  }, [autoFollowConventional, conventionalMode, scrollConventionalToIndex, showConventional, isPlaying, wordIndex]);
 
-  const handleSeek = (
-    nextIndex: number,
-    options?: { pause?: boolean; focusConventional?: boolean; scrollBehavior?: ScrollBehavior },
-  ) => {
-    const total = Math.max(0, tokensRef.current.length - 1);
-    const clampedIndex = clamp(nextIndex, 0, total);
-    if (options?.pause) {
-      setIsPlaying(false);
-      stopTtsPlayback();
+  const handleSeek = useCallback(
+    (nextIndex: number, options?: { pause?: boolean; focusConventional?: boolean; scrollBehavior?: ScrollBehavior }) => {
+      const total = Math.max(0, tokensRef.current.length - 1);
+      const clampedIndex = clamp(nextIndex, 0, total);
+      if (options?.pause) {
+        setIsPlaying(false);
+        stopTtsPlayback();
+      }
+      setWordIndex(clampedIndex);
+      if (options?.focusConventional) {
+        scrollConventionalToIndex(clampedIndex, options.scrollBehavior ?? 'smooth');
+      }
+      if (!options?.pause && ttsEnabledRef.current && ttsPlayingRef.current) {
+        startTtsFromIndex(clampedIndex);
+      }
+    },
+    [scrollConventionalToIndex, startTtsFromIndex, stopTtsPlayback],
+  );
+
+  const requestFullscreen = useCallback(async () => {
+    if (typeof document === 'undefined') return;
+    if (!document.fullscreenEnabled) return;
+    if (document.fullscreenElement) return;
+    try {
+      await document.documentElement.requestFullscreen();
+    } catch (error) {
+      console.warn('Fullscreen request failed.', error);
     }
-    setWordIndex(clampedIndex);
-    if (options?.focusConventional) {
-      scrollConventionalToIndex(clampedIndex, options.scrollBehavior ?? 'smooth');
+  }, []);
+
+  const exitFullscreen = useCallback(async () => {
+    if (typeof document === 'undefined') return;
+    if (!document.fullscreenElement) return;
+    try {
+      await document.exitFullscreen();
+    } catch (error) {
+      console.warn('Fullscreen exit failed.', error);
     }
-    if (!options?.pause && ttsEnabledRef.current && ttsPlayingRef.current) {
-      startTtsFromIndex(clampedIndex);
-    }
-  };
+  }, []);
+
+  const handleViewModeChange = useCallback(
+    (mode: ViewMode, options?: { requestFullscreen?: boolean }) => {
+      setViewMode(mode);
+      if (mode === 'focus' || mode === 'focus-text') {
+        if (options?.requestFullscreen) {
+          void requestFullscreen();
+        }
+        return;
+      }
+      void exitFullscreen();
+    },
+    [exitFullscreen, requestFullscreen],
+  );
+
+  const adjustWpm = useCallback((delta: number) => {
+    setWpm((prev) => clamp(prev + delta, 120, 900));
+  }, []);
+
+  const handleTogglePlay = useCallback(() => {
+    if (!tokensRef.current.length) return;
+    const nextState = !isPlayingRef.current;
+    setIsPlaying(nextState);
+    playCue(nextState ? 'start' : 'pause');
+  }, [playCue]);
+
+  const handleTransportStep = useCallback(
+    (direction: 'back' | 'next') => {
+      if (!tokensRef.current.length) return;
+      const nextIndex = getSteppedWordIndex(
+        wordIndexRef.current,
+        direction,
+        chunkSizeRef.current,
+        segmentStartIndicesRef.current,
+        segmentsRef.current,
+      );
+      handleSeekRef.current(nextIndex);
+      playCue(direction);
+    },
+    [playCue],
+  );
 
   const jumpToFindMatch = useCallback(
     (matchIndex: number) => {
@@ -2557,6 +2652,54 @@ function App() {
   useEffect(() => {
     handleSeekRef.current = handleSeek;
   }, [handleSeek]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isEditableTarget(event.target)) return;
+      const key = event.key.toLowerCase();
+      if (key === '?' || (key === '/' && event.shiftKey)) {
+        event.preventDefault();
+        setShowHotkeys((prev) => !prev);
+        return;
+      }
+      if (event.code === 'Space' || key === ' ') {
+        event.preventDefault();
+        handleTogglePlay();
+        return;
+      }
+      if (event.code === 'ArrowUp') {
+        event.preventDefault();
+        adjustWpm(20);
+        return;
+      }
+      if (event.code === 'ArrowDown') {
+        event.preventDefault();
+        adjustWpm(-20);
+        return;
+      }
+      if (event.code === 'ArrowLeft') {
+        event.preventDefault();
+        handleTransportStep('back');
+        return;
+      }
+      if (event.code === 'ArrowRight') {
+        event.preventDefault();
+        handleTransportStep('next');
+        return;
+      }
+      if (key === 'b') {
+        event.preventDefault();
+        handleBookmarkRef.current();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [adjustWpm, handleTogglePlay, handleTransportStep]);
 
   useEffect(() => {
     const pending = pendingBookmarkRef.current;
@@ -2712,13 +2855,13 @@ function App() {
     }
     stopTtsPlayback();
     return undefined;
-  }, [ttsEnabled, isPlaying, tokens.length]);
+  }, [isPlaying, startTtsFromIndex, stopTtsPlayback, tokens.length, ttsEnabled, wordIndex]);
 
   useEffect(() => {
     if (ttsEnabled && isPlaying && tokens.length > 0) {
       startTtsFromIndex(wordIndex);
     }
-  }, [ttsVoice, ttsSpeed, ttsLanguage, ttsChunkWords]);
+  }, [isPlaying, startTtsFromIndex, tokens.length, ttsChunkWords, ttsEnabled, ttsLanguage, ttsSpeed, ttsVoice, wordIndex]);
 
   const ensurePdfWorker = useCallback(() => {
     if (pdfWorkerRef.current) return pdfWorkerRef.current;
@@ -2773,15 +2916,16 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const callbacks = pdfWorkerCallbacksRef.current;
     return () => {
       if (pdfWorkerRef.current) {
         pdfWorkerRef.current.terminate();
         pdfWorkerRef.current = null;
       }
-      pdfWorkerCallbacksRef.current.forEach((callbacks) => {
-        callbacks.reject(new Error('PDF worker terminated.'));
+      callbacks.forEach((entry) => {
+        entry.reject(new Error('PDF worker terminated.'));
       });
-      pdfWorkerCallbacksRef.current.clear();
+      callbacks.clear();
     };
   }, []);
 
@@ -2943,7 +3087,7 @@ function App() {
     setIsPdfBusy(true);
     setPrimaryNotice({ kind: 'info', message: `Running OCR for pages ${range.start}-${range.end}` });
 
-    let worker: any = null;
+    let worker: TesseractWorker | null = null;
     const loadingTask = getDocument({ data: pdfDataRef.current });
     try {
       const { createWorker } = await import('tesseract.js');
@@ -3022,24 +3166,7 @@ function App() {
     event.target.value = '';
   };
 
-  const handleSecondaryFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setSecondaryFileMeta({
-      name: file.name,
-      size: file.size,
-      lastModified: file.lastModified,
-    });
-    const text = await loadTextFile(file, setSecondaryNotice);
-    if (text) {
-      startTransition(() => {
-        setSecondaryText(text);
-      });
-    }
-    event.target.value = '';
-  };
-
-  const handleBookmark = () => {
+  const handleBookmark = useCallback(() => {
     if (!tokens.length) return;
     let pageNumber: number | undefined;
     let pageOffset: number | undefined;
@@ -3060,7 +3187,12 @@ function App() {
       pageOffset,
     };
     setBookmarks((prev) => [nextBookmark, ...prev].slice(0, 24));
-  };
+    playCue('bookmark');
+  }, [activePageIndex, activePageNumber, pageOffsets, playCue, sourceKind, tokens, wordIndex]);
+
+  useEffect(() => {
+    handleBookmarkRef.current = handleBookmark;
+  }, [handleBookmark]);
 
   const bookmarkUrlFormat: 'encoded' | 'readable' = 'readable';
 
@@ -3262,7 +3394,7 @@ function App() {
     ));
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell view-${viewMode}${isFullscreen ? ' is-fullscreen' : ''}`}>
       <header className="hero">
         <div>
           <p className="kicker">Reading Lab</p>
@@ -3272,6 +3404,39 @@ function App() {
           </p>
         </div>
         <div className="hero-actions">
+          <div className="view-switcher">
+            <span>View</span>
+            <div className="view-toggle" role="group" aria-label="View options">
+              <button
+                type="button"
+                className={viewMode === 'deck' ? 'active' : ''}
+                onClick={() => handleViewModeChange('deck')}
+              >
+                Full Deck
+              </button>
+              <button
+                type="button"
+                className={viewMode === 'mobile' ? 'active' : ''}
+                onClick={() => handleViewModeChange('mobile')}
+              >
+                Mobile
+              </button>
+              <button
+                type="button"
+                className={viewMode === 'focus' ? 'active' : ''}
+                onClick={() => handleViewModeChange('focus', { requestFullscreen: true })}
+              >
+                Full Screen
+              </button>
+              <button
+                type="button"
+                className={viewMode === 'focus-text' ? 'active' : ''}
+                onClick={() => handleViewModeChange('focus-text', { requestFullscreen: true })}
+              >
+                Full Screen + Text
+              </button>
+            </div>
+          </div>
           <span className="status-pill">Local session</span>
           <button
             type="button"
@@ -3288,8 +3453,8 @@ function App() {
       <main className="layout">
         <section className="panel source-panel">
           <div className="panel-header">
-            <h2>Source</h2>
-            <p>Load a text, then tune the session speed.</p>
+            <h2>Source Rack</h2>
+            <p>Load a text, then cue up the deck.</p>
           </div>
 
           <label className="field">
@@ -3301,67 +3466,22 @@ function App() {
             />
           </label>
 
-          <label className="field">
-            <span>{conventionalMode === 'rendered' ? 'Primary text (raw)' : 'Primary text'}</span>
-            <textarea
-              rows={8}
-              value={sourceText}
-              onChange={(event) => setSourceText(event.target.value)}
-              placeholder="Paste or import a passage."
-            />
-          </label>
-
-          <div className="field-row">
-            <label className="field">
-              <span>Primary language</span>
-              <input
-                value={primaryLanguage}
-                onChange={(event) => setPrimaryLanguage(event.target.value)}
-                placeholder="English"
-              />
-            </label>
-            <label className="field">
-              <span>Secondary language</span>
-              <input
-                value={secondaryLanguage}
-                onChange={(event) => setSecondaryLanguage(event.target.value)}
-                placeholder="German"
-              />
-            </label>
-          </div>
-
-          <div className="field-row">
+          <div className="load-panel">
             <label className="field file">
-              <span>Import primary .txt/.md/.pdf</span>
+              <span>Import .txt/.md/.pdf</span>
               <input type="file" accept=".txt,.md,.text,.pdf,application/pdf" onChange={handlePrimaryFile} />
             </label>
-            <label className="field file">
-              <span>Import secondary .txt/.md/.pdf</span>
-              <input type="file" accept=".txt,.md,.text,.pdf,application/pdf" onChange={handleSecondaryFile} />
-            </label>
+            <p className="hint">Drop a text or PDF to load the deck.</p>
           </div>
-          {(primaryNotice || secondaryNotice) && (
+          {primaryNotice && (
             <div className="notice-row">
-              {primaryNotice && (
-                <p className={`notice ${primaryNotice.kind}`}>Primary: {primaryNotice.message}</p>
-              )}
-              {secondaryNotice && (
-                <p className={`notice ${secondaryNotice.kind}`}>Secondary: {secondaryNotice.message}</p>
-              )}
+              <p className={`notice ${primaryNotice.kind}`}>Source: {primaryNotice.message}</p>
             </div>
           )}
           {workerNotice && (
             <p className={`notice ${workerNotice.kind}`}>Indexer: {workerNotice.message}</p>
           )}
-          {(isIndexingPrimary || isIndexingSecondary) && (
-            <p className="hint">
-              {isIndexingPrimary && isIndexingSecondary
-                ? 'Indexing primary and secondary texts...'
-                : isIndexingPrimary
-                  ? 'Indexing primary text...'
-                  : 'Indexing secondary text...'}
-            </p>
-          )}
+          {isIndexingPrimary && <p className="hint">Indexing text...</p>}
 
           {sourceKind === 'pdf' && pdfState && (
             <div className="pdf-controls">
@@ -3426,20 +3546,10 @@ function App() {
             </div>
           )}
 
-          <label className="field">
-            <span>Secondary language text (optional)</span>
-            <textarea
-              rows={6}
-              value={secondaryText}
-              onChange={(event) => setSecondaryText(event.target.value)}
-              placeholder="Paste a translation or secondary language text."
-            />
-          </label>
-
           <div className="meta-grid">
             <div>
-              <span className="meta-label">Words</span>
-              <strong>{tokens.length.toLocaleString()}</strong>
+              <span className="meta-label">Session / Total</span>
+              <strong>{sessionWordPairLabel}</strong>
             </div>
             <div>
               <span className="meta-label">Remaining</span>
@@ -3461,6 +3571,110 @@ function App() {
                 </div>
               </>
             )}
+          </div>
+
+          <div className="deck-panel nav-deck">
+            <div className="deck-header">
+              <span className="deck-label">Navigator Deck</span>
+              <span className="deck-led" aria-hidden="true" />
+            </div>
+            <label className="progress deck-progress">
+              <span>Navigate</span>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0, tokens.length - 1)}
+                value={Math.min(wordIndex, Math.max(0, tokens.length - 1))}
+                onChange={(event) => handleSeek(Number(event.target.value))}
+                disabled={!tokens.length}
+              />
+            </label>
+
+            {sourceKind === 'pdf' && pdfState && (
+              <div className="page-nav">
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => jumpToPage((activePageNumber ?? pageRange.start) - 1)}
+                  disabled={(activePageNumber ?? pageRange.start) <= pageRange.start}
+                >
+                  Prev Page
+                </button>
+                <div className="page-status">
+                  Page {activePageNumber ?? pageRange.start} / {pdfState.pageCount}{' '}
+                  <span className="page-range">({pageRange.start}-{pageRange.end})</span>
+                </div>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => jumpToPage((activePageNumber ?? pageRange.start) + 1)}
+                  disabled={(activePageNumber ?? pageRange.start) >= pageRange.end}
+                >
+                  Next Page
+                </button>
+              </div>
+            )}
+
+            <div className="jump-nav">
+              {showPageJump && (
+                <div className="jump-field">
+                  <span>Go to page</span>
+                  <div className="jump-input">
+                    <input
+                      type="number"
+                      min={1}
+                      max={pageJumpMax}
+                      inputMode="numeric"
+                      value={jumpPage}
+                      onChange={(event) => setJumpPage(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          handleJumpToPage();
+                        }
+                      }}
+                      placeholder={pageJumpPlaceholder}
+                      disabled={pageJumpDisabled}
+                    />
+                    <button type="button" className="ghost small" onClick={handleJumpToPage} disabled={pageJumpDisabled}>
+                      Go
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="jump-field">
+                <span>Go to %</span>
+                <div className="jump-input">
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={1}
+                    inputMode="numeric"
+                    value={jumpPercent}
+                    onChange={(event) => setJumpPercent(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        handleJumpToPercent();
+                      }
+                    }}
+                    placeholder="0-100"
+                    disabled={!tokens.length}
+                  />
+                  <button
+                    type="button"
+                    className="ghost small"
+                    onClick={handleJumpToPercent}
+                    disabled={!tokens.length}
+                  >
+                    Go
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <BookmarksPanel onClear={handleClearBookmarks} bookmarkRows={bookmarkRows} notice={bookmarkNotice} />
           </div>
 
           <p className="hint">
@@ -3614,37 +3828,6 @@ function App() {
             />
           </div>
 
-          {bilingualReady && (
-            <div className="bilingual-panel">
-              <div className="bilingual-header">
-                <h3>Dual Language</h3>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={showBilingual}
-                    onChange={(event) => setShowBilingual(event.target.checked)}
-                  />
-                  <span>Show</span>
-                </label>
-              </div>
-              {showBilingual && (
-                <div className="bilingual-grid">
-                  <div className="bilingual-column">
-                    <span className="bilingual-label">{primaryLanguage || 'Primary'}</span>
-                    <p>{currentSegmentText || '...'}</p>
-                  </div>
-                  <div className="bilingual-column">
-                    <span className="bilingual-label">{secondaryLanguage || 'Secondary'}</span>
-                    <p>{secondarySegmentChunkText || '...'}</p>
-                  </div>
-                </div>
-              )}
-              {showBilingual && granularity !== 'sentence' && (
-                <p className="hint">Set granularity to Sentence for best alignment.</p>
-              )}
-            </div>
-          )}
-
           <div className="deck-panel">
             <div className="deck-header">
               <span className="deck-label">Main Deck</span>
@@ -3655,9 +3838,7 @@ function App() {
                 type="button"
                 className={`deck-btn primary ${isPlaying ? 'live' : ''}`}
                 aria-pressed={isPlaying}
-                onClick={() => {
-                  setIsPlaying((prev) => !prev);
-                }}
+                onClick={handleTogglePlay}
                 disabled={!tokens.length}
               >
                 {isPlaying ? 'Pause' : 'Start'}
@@ -3668,9 +3849,7 @@ function App() {
               <button
                 type="button"
                 className="deck-btn back"
-                onClick={() =>
-                  handleSeek(getSteppedWordIndex(wordIndex, 'back', chunkSize, segmentStartIndices, segments))
-                }
+                onClick={() => handleTransportStep('back')}
                 disabled={!tokens.length}
               >
                 Back
@@ -3678,14 +3857,15 @@ function App() {
               <button
                 type="button"
                 className="deck-btn next"
-                onClick={() =>
-                  handleSeek(getSteppedWordIndex(wordIndex, 'next', chunkSize, segmentStartIndices, segments))
-                }
+                onClick={() => handleTransportStep('next')}
                 disabled={!tokens.length}
               >
                 Next
               </button>
             </div>
+            <p className="deck-hint">
+              Hotkeys: Space play/pause, Left/Right back/next, Up/Down speed, B bookmark, ? help.
+            </p>
           </div>
 
           <div className="mixer-panel">
@@ -3767,6 +3947,16 @@ function App() {
                 <strong>{sentencePauseMs} ms</strong>
               </label>
             </div>
+            <div className="mixer-aux">
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={audioCuesEnabled}
+                  onChange={(event) => setAudioCuesEnabled(event.target.checked)}
+                />
+                <span>Cue sounds</span>
+              </label>
+            </div>
           </div>
 
           <div className="session-panel">
@@ -3779,13 +3969,44 @@ function App() {
                 <strong>{sessionDurationLabel}</strong>
               </div>
               <div>
-                <span className="meta-label">Words read</span>
-                <strong>{wordsRead.toLocaleString()}</strong>
+                <span className="meta-label">Session words</span>
+                <strong>{sessionWordCount.toLocaleString()}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Total words</span>
+                <strong>{totalWordCount.toLocaleString()}</strong>
               </div>
               <div>
                 <span className="meta-label">Completion</span>
                 <strong>{sessionPercent}%</strong>
               </div>
+            </div>
+            <div className="session-awards">
+              <div className="session-awards-header">
+                <h4>Milestones</h4>
+                <span className="award-count">
+                  {awards.earnedCount}/{awards.total} unlocked
+                </span>
+              </div>
+              <div className="award-grid">
+                {awards.items.map((award) => (
+                  <div
+                    key={award.id}
+                    className={`award-chip ${award.earned ? 'earned' : 'locked'}`}
+                    title={award.detail}
+                  >
+                    <span className="award-label">{award.label}</span>
+                    <span className="award-detail">{award.detail}</span>
+                  </div>
+                ))}
+              </div>
+              {awards.nextAward && nextAwardRemaining && (
+                <div className="award-next">
+                  <span className="meta-label">Next up</span>
+                  <strong>{awards.nextAward.label}</strong>
+                  <span className="award-progress">{nextAwardRemaining}</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -3838,104 +4059,6 @@ function App() {
               <p className="hint">No matches found.</p>
             )}
           </div>
-
-          <label className="progress">
-            <span>Navigate</span>
-            <input
-              type="range"
-              min={0}
-              max={Math.max(0, tokens.length - 1)}
-              value={Math.min(wordIndex, Math.max(0, tokens.length - 1))}
-              onChange={(event) => handleSeek(Number(event.target.value))}
-              disabled={!tokens.length}
-            />
-          </label>
-
-          {sourceKind === 'pdf' && pdfState && (
-            <div className="page-nav">
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => jumpToPage((activePageNumber ?? pageRange.start) - 1)}
-                disabled={(activePageNumber ?? pageRange.start) <= pageRange.start}
-              >
-                Prev Page
-              </button>
-              <div className="page-status">
-                Page {activePageNumber ?? pageRange.start} / {pdfState.pageCount}{' '}
-                <span className="page-range">({pageRange.start}-{pageRange.end})</span>
-              </div>
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => jumpToPage((activePageNumber ?? pageRange.start) + 1)}
-                disabled={(activePageNumber ?? pageRange.start) >= pageRange.end}
-              >
-                Next Page
-              </button>
-            </div>
-          )}
-
-          <div className="jump-nav">
-            {showPageJump && (
-              <div className="jump-field">
-                <span>Go to page</span>
-                <div className="jump-input">
-                  <input
-                    type="number"
-                    min={1}
-                    max={pageJumpMax}
-                    inputMode="numeric"
-                    value={jumpPage}
-                    onChange={(event) => setJumpPage(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault();
-                        handleJumpToPage();
-                      }
-                    }}
-                    placeholder={pageJumpPlaceholder}
-                    disabled={pageJumpDisabled}
-                  />
-                  <button type="button" className="ghost small" onClick={handleJumpToPage} disabled={pageJumpDisabled}>
-                    Go
-                  </button>
-                </div>
-              </div>
-            )}
-            <div className="jump-field">
-              <span>Go to %</span>
-              <div className="jump-input">
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step={1}
-                  inputMode="numeric"
-                  value={jumpPercent}
-                  onChange={(event) => setJumpPercent(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault();
-                      handleJumpToPercent();
-                    }
-                  }}
-                  placeholder="0-100"
-                  disabled={!tokens.length}
-                />
-                <button
-                  type="button"
-                  className="ghost small"
-                  onClick={handleJumpToPercent}
-                  disabled={!tokens.length}
-                >
-                  Go
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <BookmarksPanel onClear={handleClearBookmarks} bookmarkRows={bookmarkRows} notice={bookmarkNotice} />
         </section>
 
         <section className="panel companion-panel">
@@ -4036,6 +4159,48 @@ function App() {
           </div>
         </section>
       </main>
+
+      {showHotkeys && (
+        <div className="hotkey-sheet" role="dialog" aria-label="Hotkey guide">
+          <div className="hotkey-header">
+            <span>Hotkeys</span>
+            <button type="button" className="ghost small" onClick={() => setShowHotkeys(false)}>
+              Close
+            </button>
+          </div>
+          <div className="hotkey-list">
+            <div className="hotkey-row">
+              <span className="hotkey-key">Space</span>
+              <span className="hotkey-label">Play / Pause</span>
+            </div>
+            <div className="hotkey-row">
+              <span className="hotkey-key">Left</span>
+              <span className="hotkey-label">Back</span>
+            </div>
+            <div className="hotkey-row">
+              <span className="hotkey-key">Right</span>
+              <span className="hotkey-label">Next</span>
+            </div>
+            <div className="hotkey-row">
+              <span className="hotkey-key">Up</span>
+              <span className="hotkey-label">Faster</span>
+            </div>
+            <div className="hotkey-row">
+              <span className="hotkey-key">Down</span>
+              <span className="hotkey-label">Slower</span>
+            </div>
+            <div className="hotkey-row">
+              <span className="hotkey-key">B</span>
+              <span className="hotkey-label">Bookmark</span>
+            </div>
+            <div className="hotkey-row">
+              <span className="hotkey-key">?</span>
+              <span className="hotkey-label">Toggle help</span>
+            </div>
+          </div>
+          <p className="hotkey-hint">Press ? anytime to show or hide this panel.</p>
+        </div>
+      )}
     </div>
   );
 }

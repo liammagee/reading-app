@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(fly launch)",
-      "Bash(fly apps destroy:*)"
+      "Bash(fly apps destroy:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)"
     ]
   }
 }

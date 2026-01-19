@@ -10,6 +10,13 @@ type PdfOutlineItem = {
   items: PdfOutlineItem[];
 };
 
+type PdfOutlineNode = {
+  title?: string;
+  dest?: unknown;
+  url?: string;
+  items?: PdfOutlineNode[];
+};
+
 type ExtractRequest = {
   id: number;
   type: 'extract';
@@ -66,7 +73,7 @@ const extractPdfData = async (
     }
 
     const outline = await (async () => {
-      const rawOutline = await pdf.getOutline();
+      const rawOutline = (await pdf.getOutline()) as PdfOutlineNode[] | null;
       if (!rawOutline) return [] as PdfOutlineItem[];
 
       const resolveDest = async (dest: unknown) => {
@@ -81,7 +88,7 @@ const extractPdfData = async (
         }
       };
 
-      const mapItems = async (items: any[]): Promise<PdfOutlineItem[]> => {
+      const mapItems = async (items: PdfOutlineNode[]): Promise<PdfOutlineItem[]> => {
         const mapped: PdfOutlineItem[] = [];
         for (const item of items) {
           const pageNumber = await resolveDest(item.dest);
