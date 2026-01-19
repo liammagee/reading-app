@@ -1666,6 +1666,16 @@
   align-items: center;
 }
 
+.conventional-toggles {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(27, 26, 21, 0.1);
+}
+
+.conventional-toggles + .hint {
+  margin-top: 6px;
+}
+
 .toggle {
   display: inline-flex;
   align-items: center;

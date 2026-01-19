@@ -4316,7 +4316,7 @@ function App() {
             <ConventionalRendered ref={conventionalRef} content={renderedMarkdown} />
           )}
 
-          <div className="toggle-row">
+          <div className="toggle-row conventional-toggles">
             <label className="toggle">
               <input
                 type="checkbox"
