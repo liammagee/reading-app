@@ -149,27 +149,15 @@ type AwardStatus = AwardDefinition & {
   earned: boolean;
 };
 
-type IdleDeadline = {
-  didTimeout: boolean;
-  timeRemaining: () => number;
+type StreakStats = {
+  dayKey: string;
+  dailyWords: number;
+  streak: number;
+  bestStreak: number;
+  lastCompletedDay?: string;
 };
-
-type IdleCallback = (deadline: IdleDeadline) => void;
-
-type IdleRequestOptions = {
-  timeout?: number;
-};
-
-type IdleCallbackHandle = number;
 
 type TesseractWorker = import('tesseract.js').Worker;
-
-declare global {
-  interface Window {
-    requestIdleCallback?: (callback: IdleCallback, options?: IdleRequestOptions) => IdleCallbackHandle;
-    cancelIdleCallback?: (handle: IdleCallbackHandle) => void;
-  }
-}
 
 const DEFAULT_TEXT = `Paste a passage to begin.
 
@@ -181,9 +169,11 @@ const LAST_DOCUMENT_DB = 'reader-documents';
 const LAST_DOCUMENT_STORE = 'documents';
 const LAST_DOCUMENT_ID = 'last';
 const USER_PREFERENCES_KEY = 'reader:preferences';
+const STREAK_STORAGE_KEY = 'reader:streak';
 const DEFAULT_CONVENTIONAL_CHUNK_SIZE = 120;
 const CONVENTIONAL_BUFFER_CHUNKS = 2;
 const DEFAULT_CONVENTIONAL_CHUNK_HEIGHT = 240;
+const DEFAULT_DAILY_GOAL_WORDS = 2000;
 const LEFT_EYE_LANDMARKS = [33, 160, 158, 133, 153, 144] as const;
 const RIGHT_EYE_LANDMARKS = [362, 385, 387, 263, 373, 380] as const;
 
@@ -290,6 +280,41 @@ const formatDuration = (ms: number) => {
     return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   }
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+};
+
+const getLocalDayKey = (date = new Date()) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const parseDayKey = (dayKey: string) => {
+  const [year, month, day] = dayKey.split('-').map((part) => Number(part));
+  if (!year || !month || !day) return null;
+  return new Date(year, month - 1, day);
+};
+
+const isPreviousDay = (previousKey: string, currentKey: string) => {
+  const previousDate = parseDayKey(previousKey);
+  const currentDate = parseDayKey(currentKey);
+  if (!previousDate || !currentDate) return false;
+  const diffMs = currentDate.getTime() - previousDate.getTime();
+  return diffMs > 0 && diffMs <= 24 * 60 * 60 * 1000;
+};
+
+const readStreakStorage = () => {
+  if (typeof window === 'undefined') return null;
+  const raw = window.localStorage.getItem(STREAK_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as {
+      dailyGoalWords?: number;
+      stats?: Partial<StreakStats>;
+    };
+  } catch {
+    return null;
+  }
 };
 
 const getSentencePauseMs = (word: string, basePauseMs: number) => {
@@ -590,6 +615,27 @@ function App() {
   const [minWordMs, setMinWordMs] = useState(160);
   const [sentencePauseMs, setSentencePauseMs] = useState(200);
   const [sessionElapsedMs, setSessionElapsedMs] = useState(0);
+  const [dailyGoalWords, setDailyGoalWords] = useState(() => {
+    const stored = readStreakStorage();
+    const goal = stored?.dailyGoalWords;
+    return typeof goal === 'number' && goal > 0 ? goal : DEFAULT_DAILY_GOAL_WORDS;
+  });
+  const [streakStats, setStreakStats] = useState<StreakStats>(() => {
+    const todayKey = getLocalDayKey();
+    const stored = readStreakStorage();
+    const stats = stored?.stats;
+    const dayKey = typeof stats?.dayKey === 'string' ? stats.dayKey : todayKey;
+    return {
+      dayKey,
+      dailyWords: typeof stats?.dailyWords === 'number' ? stats.dailyWords : 0,
+      streak: typeof stats?.streak === 'number' ? stats.streak : 0,
+      bestStreak: typeof stats?.bestStreak === 'number' ? stats.bestStreak : 0,
+      lastCompletedDay: typeof stats?.lastCompletedDay === 'string' ? stats.lastCompletedDay : undefined,
+    };
+  });
+  const [showSessionRecap, setShowSessionRecap] = useState(false);
+  const [awardToast, setAwardToast] = useState<AwardStatus | null>(null);
+  const [highlightAwardId, setHighlightAwardId] = useState<string | null>(null);
   const [wordIndex, setWordIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [showHotkeys, setShowHotkeys] = useState(false);
@@ -790,6 +836,15 @@ function App() {
   const prefsSaveTimerRef = useRef<number | null>(null);
   const prefsIdleRef = useRef<number | null>(null);
   const didPrefHydrateRef = useRef(false);
+  const hasSessionActivityRef = useRef(false);
+  const lastCountedRef = useRef<{ dayKey: string; docKey: string; words: number }>({
+    dayKey: getLocalDayKey(),
+    docKey: '',
+    words: 0,
+  });
+  const awardToastTimerRef = useRef<number | null>(null);
+  const awardHighlightTimerRef = useRef<number | null>(null);
+  const earnedAwardIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     ttsEnabledRef.current = ttsEnabled;
@@ -2122,6 +2177,17 @@ function App() {
   };
   const nextAwardRemaining = awards.nextAward ? formatAwardRemaining(awards.nextAward) : null;
 
+  const dailyProgress = dailyGoalWords > 0
+    ? Math.min(100, Math.round((streakStats.dailyWords / dailyGoalWords) * 100))
+    : 0;
+  const dailyRemainingWords = Math.max(0, dailyGoalWords - streakStats.dailyWords);
+  const dailyProgressLabel = `${streakStats.dailyWords.toLocaleString()} / ${dailyGoalWords.toLocaleString()} (${dailyProgress}%)`;
+  const streakLabel = `${streakStats.streak} ${streakStats.streak === 1 ? 'day' : 'days'}`;
+  const bestStreakLabel = `${streakStats.bestStreak} ${streakStats.bestStreak === 1 ? 'day' : 'days'}`;
+  const nextGoalLabel = dailyRemainingWords === 0
+    ? 'Goal met today'
+    : `${dailyRemainingWords.toLocaleString()} words to ${dailyGoalWords.toLocaleString()}`;
+
   useEffect(() => {
     if (!tokens.length) {
       setFurthestRead(null);
@@ -2151,6 +2217,121 @@ function App() {
       return current.index > prev.index ? current : prev;
     });
   }, [activePageIndex, activePageNumber, pageOffsets, sourceKind, tokens.length, wordIndex]);
+
+  useEffect(() => {
+    const todayKey = getLocalDayKey();
+    if (streakStats.dayKey === todayKey) return;
+    setStreakStats((prev: StreakStats) => ({
+      ...prev,
+      dayKey: todayKey,
+      dailyWords: 0,
+    }));
+    lastCountedRef.current = { dayKey: todayKey, docKey, words: sessionWordCount };
+  }, [docKey, sessionWordCount, streakStats.dayKey]);
+
+  useEffect(() => {
+    if (!docKey) return;
+    const todayKey = getLocalDayKey();
+    if (streakStats.dayKey !== todayKey) return;
+    if (lastCountedRef.current.dayKey !== todayKey || lastCountedRef.current.docKey !== docKey) {
+      lastCountedRef.current = { dayKey: todayKey, docKey, words: sessionWordCount };
+      return;
+    }
+    const delta = sessionWordCount - lastCountedRef.current.words;
+    if (delta > 0) {
+      setStreakStats((prev: StreakStats) => ({
+        ...prev,
+        dailyWords: prev.dailyWords + delta,
+      }));
+    }
+    lastCountedRef.current.words = sessionWordCount;
+  }, [docKey, sessionWordCount, streakStats.dayKey]);
+
+  useEffect(() => {
+    if (!dailyGoalWords || streakStats.dailyWords < dailyGoalWords) return;
+    if (streakStats.lastCompletedDay === streakStats.dayKey) return;
+    setStreakStats((prev: StreakStats) => {
+      if (prev.lastCompletedDay === prev.dayKey) return prev;
+      const continueStreak = prev.lastCompletedDay ? isPreviousDay(prev.lastCompletedDay, prev.dayKey) : false;
+      const nextStreak = continueStreak ? prev.streak + 1 : 1;
+      return {
+        ...prev,
+        streak: nextStreak,
+        bestStreak: Math.max(prev.bestStreak, nextStreak),
+        lastCompletedDay: prev.dayKey,
+      };
+    });
+  }, [dailyGoalWords, streakStats.dailyWords, streakStats.dayKey, streakStats.lastCompletedDay]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const payload = { dailyGoalWords, stats: streakStats };
+    window.localStorage.setItem(STREAK_STORAGE_KEY, JSON.stringify(payload));
+  }, [dailyGoalWords, streakStats]);
+
+  useEffect(() => {
+    if (docKey) {
+      hasSessionActivityRef.current = false;
+      setShowSessionRecap(false);
+    }
+  }, [docKey]);
+
+  useEffect(() => {
+    if (isPlaying) {
+      hasSessionActivityRef.current = true;
+      setShowSessionRecap(false);
+      return;
+    }
+    if (!hasSessionActivityRef.current) return;
+    if (sessionElapsedMs === 0 && sessionWordCount === 0) return;
+    setShowSessionRecap(true);
+  }, [isPlaying, sessionElapsedMs, sessionWordCount]);
+
+  useEffect(() => {
+    if (earnedAwardIdsRef.current.size === 0) {
+      awards.items.filter((item) => item.earned).forEach((item) => {
+        earnedAwardIdsRef.current.add(item.id);
+      });
+      return;
+    }
+    const newlyEarned = awards.items.filter((item) => item.earned && !earnedAwardIdsRef.current.has(item.id));
+    if (!newlyEarned.length) return;
+    newlyEarned.forEach((item) => {
+      earnedAwardIdsRef.current.add(item.id);
+    });
+    const nextAward = newlyEarned[0];
+    setAwardToast(nextAward);
+    setHighlightAwardId(nextAward.id);
+    if (awardToastTimerRef.current) {
+      window.clearTimeout(awardToastTimerRef.current);
+    }
+    awardToastTimerRef.current = window.setTimeout(() => {
+      setAwardToast(null);
+    }, 2800);
+    if (awardHighlightTimerRef.current) {
+      window.clearTimeout(awardHighlightTimerRef.current);
+    }
+    awardHighlightTimerRef.current = window.setTimeout(() => {
+      setHighlightAwardId(null);
+    }, 1600);
+  }, [awards.items]);
+
+  useEffect(() => {
+    earnedAwardIdsRef.current = new Set();
+    setAwardToast(null);
+    setHighlightAwardId(null);
+  }, [docKey]);
+
+  useEffect(() => {
+    return () => {
+      if (awardToastTimerRef.current) {
+        window.clearTimeout(awardToastTimerRef.current);
+      }
+      if (awardHighlightTimerRef.current) {
+        window.clearTimeout(awardHighlightTimerRef.current);
+      }
+    };
+  }, []);
 
   const pdfStats = useMemo(() => {
     if (!pdfState) return null;
@@ -3395,6 +3576,13 @@ function App() {
 
   return (
     <div className={`app-shell view-${viewMode}${isFullscreen ? ' is-fullscreen' : ''}`}>
+      {awardToast && (
+        <div className="award-toast" role="status" aria-live="polite">
+          <span className="award-toast-label">Milestone unlocked</span>
+          <strong className="award-toast-title">{awardToast.label}</strong>
+          <span className="award-toast-detail">{awardToast.detail}</span>
+        </div>
+      )}
       <header className="hero">
         <div>
           <p className="kicker">Reading Lab</p>
@@ -3992,7 +4180,9 @@ function App() {
                 {awards.items.map((award) => (
                   <div
                     key={award.id}
-                    className={`award-chip ${award.earned ? 'earned' : 'locked'}`}
+                    className={`award-chip ${award.earned ? 'earned' : 'locked'}${
+                      highlightAwardId === award.id ? ' is-new' : ''
+                    }`}
                     title={award.detail}
                   >
                     <span className="award-label">{award.label}</span>
@@ -4008,6 +4198,57 @@ function App() {
                 </div>
               )}
             </div>
+            <div className="session-goals">
+              <div className="goal-row">
+                <span className="meta-label">Daily goal</span>
+                <div className="goal-input">
+                  <input
+                    type="number"
+                    min={200}
+                    max={20000}
+                    value={dailyGoalWords}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      if (!Number.isFinite(next)) return;
+                      setDailyGoalWords(clamp(next, 200, 20000));
+                    }}
+                  />
+                  <span>words</span>
+                </div>
+                <span className="goal-progress">{dailyProgressLabel}</span>
+              </div>
+              <div className="goal-row">
+                <span className="meta-label">Streak</span>
+                <strong>{streakLabel}</strong>
+                <span className="goal-progress">Best {bestStreakLabel}</span>
+              </div>
+            </div>
+            {showSessionRecap && (
+              <div className="session-recap">
+                <div className="session-recap-header">
+                  <h4>Session recap</h4>
+                  <span className="recap-pill">Paused</span>
+                </div>
+                <div className="session-recap-grid">
+                  <div>
+                    <span className="meta-label">Time</span>
+                    <strong>{sessionDurationLabel}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">Words</span>
+                    <strong>{sessionWordCount.toLocaleString()}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">Best streak</span>
+                    <strong>{bestStreakLabel}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">Next goal</span>
+                    <strong>{nextGoalLabel}</strong>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="find-panel">

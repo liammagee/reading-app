@@ -1340,6 +1340,10 @@
   box-shadow: 0 10px 16px rgba(228, 87, 46, 0.25);
 }
 
+.award-chip.is-new {
+  animation: awardPulse 0.6s ease;
+}
+
 .award-chip.locked {
   border-style: dashed;
 }
@@ -1366,6 +1370,137 @@
 .award-progress {
   font-size: 0.65rem;
   letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(244, 239, 228, 0.55);
+}
+
+.session-goals {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.goal-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.goal-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(12, 11, 9, 0.55);
+}
+
+.goal-input input {
+  width: 86px;
+  border: none;
+  background: transparent;
+  color: #f5f1e8;
+  text-align: right;
+  font-weight: 600;
+}
+
+.goal-input span {
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(244, 239, 228, 0.6);
+}
+
+.goal-progress {
+  justify-self: end;
+  font-size: 0.65rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(244, 239, 228, 0.55);
+}
+
+.session-recap {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.session-recap-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.session-recap-header h4 {
+  margin: 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: rgba(244, 239, 228, 0.72);
+}
+
+.recap-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: rgba(244, 239, 228, 0.7);
+}
+
+.session-recap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.award-toast {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  width: min(320px, calc(100vw - 32px));
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: rgba(18, 16, 14, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 16px 30px rgba(12, 10, 8, 0.3);
+  color: #f5f1e8;
+  display: grid;
+  gap: 4px;
+  text-align: center;
+  pointer-events: none;
+  animation: toastIn 0.35s ease;
+}
+
+.award-toast-label {
+  font-size: 0.6rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(244, 239, 228, 0.6);
+}
+
+.award-toast-title {
+  font-size: 1rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.award-toast-detail {
+  font-size: 0.65rem;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: rgba(244, 239, 228, 0.55);
 }
