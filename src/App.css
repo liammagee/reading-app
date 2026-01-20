@@ -26,6 +26,19 @@
   max-width: 100%;
 }
 
+.hero-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.brand-sigil {
+  width: clamp(28px, 4vw, 44px);
+  height: clamp(28px, 4vw, 44px);
+  flex-shrink: 0;
+}
+
 .hero h1 {
   margin: 0;
   font-size: clamp(1.4rem, 3vw + 0.8rem, 2.2rem);

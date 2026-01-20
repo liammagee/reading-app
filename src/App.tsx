@@ -15,6 +15,7 @@ import remarkGfm from 'remark-gfm';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { buildApiUrl } from './env';
+import { BrandSigil } from './BrandSigil';
 import {
   BOOKMARK_VERSION,
   type BookmarkPayload,
@@ -3580,7 +3581,10 @@ function App() {
         </div>
       )}
       <header className="hero">
-        <h1>Pacer</h1>
+        <div className="hero-brand">
+          <BrandSigil className="brand-sigil" decorative />
+          <h1>Pacer</h1>
+        </div>
         <div className="hero-actions">
           <div className="view-toggle" role="group" aria-label="View options">
             <button
