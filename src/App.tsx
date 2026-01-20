@@ -360,11 +360,7 @@ const ReaderDisplay = memo(
       : '';
     return (
       <div className={`display-stack${showContext ? ' with-context' : ''}`}>
-        <span className="display-word" aria-live="polite">
-          <span className="word-left">{left}</span>
-          <span className="word-pivot">{pivot}</span>
-          <span className="word-right">{right}</span>
-        </span>
+        <span className="display-word" aria-live="polite"><span className="word-left">{left}</span><span className="word-pivot">{pivot}</span><span className="word-right">{right}</span></span>
         {showContext && (
           <span className="display-context" aria-hidden="true">
             {before && <span className="context-before">{before} </span>}
