@@ -50,7 +50,7 @@ export const tokenize = (text: string) => {
   return mergeBracketedTokens(normalized.split(' '));
 };
 
-export type Granularity = 'word' | 'bigram' | 'trigram' | 'sentence';
+export type Granularity = 'word' | 'bigram' | 'trigram' | 'sentence' | 'tweet';
 
 export type Segment = {
   text: string;
@@ -82,6 +82,9 @@ export const segmentTokens = (tokens: string[], granularity: Granularity): Segme
       });
     }
     return segments;
+  }
+  if (granularity === 'tweet') {
+    return segmentTextByTweet(tokens.join(' '));
   }
   const segments: Segment[] = [];
   let buffer: string[] = [];
@@ -148,5 +151,97 @@ export const segmentTextBySentence = (text: string): Segment[] => {
     });
     startIndex += sentenceTokens.length;
   }
+  return segments;
+};
+
+export const segmentTextByTweet = (text: string, maxChars = 280): Segment[] => {
+  const sentences = segmentTextBySentence(text);
+  if (!sentences.length) return [];
+  const segments: Segment[] = [];
+  let bufferText = '';
+  let bufferStartIndex = 0;
+  let bufferWordCount = 0;
+
+  const flushBuffer = () => {
+    if (!bufferText) return;
+    segments.push({
+      text: bufferText,
+      startIndex: bufferStartIndex,
+      wordCount: bufferWordCount,
+    });
+    bufferText = '';
+    bufferWordCount = 0;
+  };
+
+  for (const sentence of sentences) {
+    const sentenceText = sentence.text.trim();
+    if (!sentenceText) continue;
+    if (sentenceText.length > maxChars) {
+      flushBuffer();
+      const tokens = tokenize(sentenceText);
+      if (!tokens.length) continue;
+      let tokenBuffer: string[] = [];
+      let tokenStartIndex = sentence.startIndex;
+      let tokenCharCount = 0;
+
+      for (let i = 0; i < tokens.length; i += 1) {
+        const token = tokens[i];
+        const tokenLength = token.length;
+        if (!tokenBuffer.length && tokenLength > maxChars) {
+          segments.push({
+            text: token,
+            startIndex: tokenStartIndex,
+            wordCount: 1,
+          });
+          tokenStartIndex += 1;
+          tokenCharCount = 0;
+          tokenBuffer = [];
+          continue;
+        }
+        const nextLength = tokenBuffer.length ? tokenCharCount + 1 + tokenLength : tokenLength;
+        if (tokenBuffer.length && nextLength > maxChars) {
+          segments.push({
+            text: tokenBuffer.join(' '),
+            startIndex: tokenStartIndex,
+            wordCount: tokenBuffer.length,
+          });
+          tokenStartIndex += tokenBuffer.length;
+          tokenBuffer = [token];
+          tokenCharCount = tokenLength;
+          continue;
+        }
+        tokenBuffer.push(token);
+        tokenCharCount = nextLength;
+      }
+
+      if (tokenBuffer.length) {
+        segments.push({
+          text: tokenBuffer.join(' '),
+          startIndex: tokenStartIndex,
+          wordCount: tokenBuffer.length,
+        });
+      }
+      continue;
+    }
+
+    if (!bufferText) {
+      bufferText = sentenceText;
+      bufferStartIndex = sentence.startIndex;
+      bufferWordCount = sentence.wordCount;
+      continue;
+    }
+    const nextLength = bufferText.length + 1 + sentenceText.length;
+    if (nextLength <= maxChars) {
+      bufferText = `${bufferText} ${sentenceText}`;
+      bufferWordCount += sentence.wordCount;
+    } else {
+      flushBuffer();
+      bufferText = sentenceText;
+      bufferStartIndex = sentence.startIndex;
+      bufferWordCount = sentence.wordCount;
+    }
+  }
+
+  flushBuffer();
   return segments;
 };

@@ -5,15 +5,18 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
 } from 'react';
 import type { FaceLandmarker, HandLandmarker } from '@mediapipe/tasks-vision';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import JSZip from 'jszip';
 import { buildApiUrl } from './env';
 import { BrandSigil } from './BrandSigil';
 import {
@@ -24,7 +27,14 @@ import {
   parseBookmarkValue,
   readBookmarkParam,
 } from './bookmarkUtils';
-import { segmentTextBySentence, segmentTokens, tokenize, type Granularity, type Segment } from './textUtils';
+import {
+  segmentTextBySentence,
+  segmentTextByTweet,
+  segmentTokens,
+  tokenize,
+  type Granularity,
+  type Segment,
+} from './textUtils';
 import './App.css';
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -56,7 +66,7 @@ type SavedSession = {
 type LastDocument = {
   sourceText: string;
   title?: string;
-  sourceKind?: 'text' | 'pdf';
+  sourceKind?: 'text' | 'pdf' | 'epub';
   primaryFileMeta?: FileMeta | null;
 };
 
@@ -70,6 +80,8 @@ type UserPreferences = {
   cameraHandEnabled?: boolean;
   cameraEyeEnabled?: boolean;
   cameraPreview?: boolean;
+  displayScale?: number;
+  longWordSlowdown?: number;
 };
 
 type Notice = {
@@ -110,6 +122,18 @@ type PdfState = {
   pageTexts: string[];
   pageTokenCounts: number[];
   outline: PdfOutlineItem[];
+};
+
+type StoredDocument = {
+  id: string;
+  sourceText: string;
+  title?: string;
+  sourceKind: 'text' | 'pdf' | 'epub';
+  primaryFileMeta?: FileMeta | null;
+  wordCount: number;
+  updatedAt: number;
+  pageRange?: PageRange;
+  pdfState?: PdfState | null;
 };
 
 type FurthestRead = {
@@ -230,6 +254,23 @@ const getConventionalChunkSize = (tokenCount: number) => {
 
 const getConventionalBufferChunks = (chunkSize: number) => (chunkSize <= 80 ? 3 : CONVENTIONAL_BUFFER_CHUNKS);
 
+const buildDocumentKey = (
+  sourceKind: 'text' | 'pdf' | 'epub',
+  primaryFileMeta: FileMeta | null,
+  sourceText: string,
+) => {
+  if (sourceKind === 'pdf' && primaryFileMeta) {
+    return `reader:pdf:${primaryFileMeta.name}:${primaryFileMeta.size}:${primaryFileMeta.lastModified}`;
+  }
+  if (primaryFileMeta) {
+    const kind = sourceKind === 'epub' ? 'epub' : 'text';
+    return `reader:${kind}:${primaryFileMeta.name}:${primaryFileMeta.size}:${primaryFileMeta.lastModified}`;
+  }
+  if (!sourceText.trim()) return '';
+  const kind = sourceKind === 'epub' ? 'epub' : 'text';
+  return `reader:${kind}:${hashText(sourceText)}`;
+};
+
 const getSteppedWordIndex = (
   currentIndex: number,
   direction: 'back' | 'next',
@@ -328,6 +369,40 @@ const getSentencePauseMs = (word: string, basePauseMs: number) => {
   if (/[.!?]["')\]]*$/.test(trimmed)) return base;
   if (/[;:]["')\]]*$/.test(trimmed)) return minorPause;
   return 0;
+};
+
+const getReadingComplexityMultiplier = (text: string) => {
+  if (!text.trim()) return 1;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!words.length) return 1;
+  let maxLength = 0;
+  let hyphenatedCount = 0;
+  const hyphenPattern = /\p{L}[-\u2010-\u2014]\p{L}/u;
+  for (const raw of words) {
+    const cleaned = raw.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+    if (!cleaned) continue;
+    const plain = cleaned.replace(/[^-\p{L}\p{N}]/gu, '');
+    const length = plain.replace(/[-\u2010-\u2014]/g, '').length;
+    if (length > maxLength) maxLength = length;
+    if (hyphenPattern.test(cleaned)) hyphenatedCount += 1;
+  }
+  const extraLength = Math.max(0, maxLength - 6);
+  const lengthBoost = Math.min(0.3, extraLength * 0.03);
+  const hyphenBoost = Math.min(0.18, hyphenatedCount * 0.06);
+  return 1 + lengthBoost + hyphenBoost;
+};
+
+const getMaxWordLength = (text: string) => {
+  if (!text.trim()) return 0;
+  const words = text.split(/\s+/).filter(Boolean);
+  let maxLength = 0;
+  for (const raw of words) {
+    const cleaned = raw.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+    if (!cleaned) continue;
+    const length = cleaned.replace(/[-\u2010-\u2014]/g, '').length;
+    if (length > maxLength) maxLength = length;
+  }
+  return maxLength;
 };
 
 type ReaderDisplayProps = {
@@ -483,9 +558,127 @@ const writeLastDocumentToDb = async (payload: LastDocument) => {
   }
 };
 
+const readStoredDocumentsFromDb = async (): Promise<StoredDocument[]> => {
+  if (typeof window === 'undefined' || !('indexedDB' in window)) return [];
+  try {
+    const db = await openLastDocumentDb();
+    return await new Promise<StoredDocument[]>((resolve, reject) => {
+      const transaction = db.transaction(LAST_DOCUMENT_STORE, 'readonly');
+      const store = transaction.objectStore(LAST_DOCUMENT_STORE);
+      const request = store.getAll();
+      request.onsuccess = () => {
+        const results = (request.result as StoredDocument[]).filter(
+          (item) => item && typeof item.id === 'string',
+        );
+        resolve(results);
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => db.close();
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    });
+  } catch (error) {
+    console.warn('Failed to read stored documents from IndexedDB.', error);
+    return [];
+  }
+};
+
+const writeStoredDocumentToDb = async (payload: StoredDocument) => {
+  if (typeof window === 'undefined' || !('indexedDB' in window)) return;
+  try {
+    const db = await openLastDocumentDb();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(LAST_DOCUMENT_STORE, 'readwrite');
+      const store = transaction.objectStore(LAST_DOCUMENT_STORE);
+      store.put(payload, payload.id);
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    });
+  } catch (error) {
+    console.warn('Failed to persist stored document to IndexedDB.', error);
+  }
+};
+
+const clearStoredDocumentsFromDb = async () => {
+  if (typeof window === 'undefined' || !('indexedDB' in window)) return;
+  try {
+    const db = await openLastDocumentDb();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(LAST_DOCUMENT_STORE, 'readwrite');
+      const store = transaction.objectStore(LAST_DOCUMENT_STORE);
+      const request = store.openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        if (cursor.key !== LAST_DOCUMENT_ID) {
+          cursor.delete();
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    });
+  } catch (error) {
+    console.warn('Failed to clear stored documents from IndexedDB.', error);
+  }
+};
+
 const isPdfFile = (file: File) => {
   const name = file.name.toLowerCase();
   return file.type === 'application/pdf' || name.endsWith('.pdf');
+};
+
+const isEpubFile = (file: File) => {
+  const name = file.name.toLowerCase();
+  return file.type === 'application/epub+zip' || name.endsWith('.epub');
+};
+
+const resolveEpubPath = (basePath: string, href: string) => {
+  const cleaned = href.split('#')[0]?.split('?')[0]?.trim();
+  if (!cleaned || /^[a-z]+:\/\//i.test(cleaned)) return null;
+  const combined = cleaned.startsWith('/') ? cleaned.slice(1) : `${basePath}${cleaned}`;
+  const segments = combined.split('/').filter(Boolean);
+  const resolved: string[] = [];
+  for (const segment of segments) {
+    if (segment === '.') continue;
+    if (segment === '..') {
+      resolved.pop();
+      continue;
+    }
+    resolved.push(segment);
+  }
+  return resolved.join('/');
+};
+
+const extractEpubHtmlText = (html: string) => {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const root = doc.body ?? doc.documentElement;
+  if (!root) return '';
+  doc.querySelectorAll('script, style, svg, nav, header, footer, aside, noscript').forEach((node) => {
+    node.remove();
+  });
+  const blocks = Array.from(root.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote, pre'));
+  const parts = blocks
+    .map((node) => node.textContent?.replace(/\s+/g, ' ').trim())
+    .filter((value): value is string => Boolean(value));
+  const raw = parts.length ? parts.join('\n\n') : root.textContent || '';
+  return raw.replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 };
 
 const normalizeRange = (start: number, end: number, pageCount: number): PageRange => {
@@ -605,12 +798,17 @@ function App() {
   const [title, setTitle] = useState('Untitled Session');
   const [sourceText, setSourceText] = useState(DEFAULT_TEXT);
   const [primaryFileMeta, setPrimaryFileMeta] = useState<FileMeta | null>(null);
+  const [savedDocuments, setSavedDocuments] = useState<StoredDocument[]>([]);
   const [wpm, setWpm] = useState(320);
   const [chunkSize, setChunkSize] = useState(1);
   const [granularity, setGranularity] = useState<Granularity>('word');
   const [contextRadius, setContextRadius] = useState(0);
   const [minWordMs, setMinWordMs] = useState(160);
   const [sentencePauseMs, setSentencePauseMs] = useState(200);
+  const [displayScale, setDisplayScale] = useState(1);
+  const [fitScale, setFitScale] = useState(1);
+  const [readerDisplayWidth, setReaderDisplayWidth] = useState(0);
+  const [longWordSlowdown, setLongWordSlowdown] = useState(40);
   const [sessionElapsedMs, setSessionElapsedMs] = useState(0);
   const [dailyGoalWords, setDailyGoalWords] = useState(() => {
     const stored = readStreakStorage();
@@ -652,7 +850,7 @@ function App() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [bookmarkNotice, setBookmarkNotice] = useState<Notice | null>(null);
   const [furthestRead, setFurthestRead] = useState<FurthestRead | null>(null);
-  const [sourceKind, setSourceKind] = useState<'text' | 'pdf'>('text');
+  const [sourceKind, setSourceKind] = useState<'text' | 'pdf' | 'epub'>('text');
   const [pdfState, setPdfState] = useState<PdfState | null>(null);
   const [pageRange, setPageRange] = useState<PageRange>({ start: 1, end: 1 });
   const [pageRangeDraft, setPageRangeDraft] = useState<PageRange>({ start: 1, end: 1 });
@@ -707,6 +905,14 @@ function App() {
     () => segments.map((segment) => segment.startIndex),
     [segments],
   );
+  const sentenceSegments = useMemo(() => {
+    if (!deferredSourceText.trim()) return [];
+    return granularity === 'sentence' ? segments : segmentTextBySentence(deferredSourceText);
+  }, [deferredSourceText, granularity, segments]);
+  const sentenceStartIndices = useMemo(
+    () => sentenceSegments.map((segment) => segment.startIndex),
+    [sentenceSegments],
+  );
   const segmentIndex = useMemo(
     () => getSegmentIndexForWordIndex(wordIndex, segmentStartIndices),
     [segmentStartIndices, wordIndex],
@@ -723,6 +929,18 @@ function App() {
     () => currentSegments.map((segment) => segment.text).join(' '),
     [currentSegments],
   );
+  const singleWordMode = granularity === 'word' && chunkSize === 1;
+  const longestWordLength = useMemo(() => getMaxWordLength(currentSegmentText), [currentSegmentText]);
+  const fallbackFitScale = useMemo(() => {
+    if (!singleWordMode) return 1;
+    if (!longestWordLength) return 1;
+    if (longestWordLength <= 12) return 1;
+    return clamp(12 / longestWordLength, 0.35, 1);
+  }, [longestWordLength, singleWordMode]);
+  const readerDisplayStyle = useMemo(
+    () => ({ '--display-scale': displayScale, '--fit-scale': fitScale } as CSSProperties),
+    [displayScale, fitScale],
+  );
   const activeSegmentRange = useMemo(() => {
     if (!currentSegments.length) return null;
     const start = currentSegments[0].startIndex;
@@ -730,16 +948,10 @@ function App() {
     const end = last.startIndex + Math.max(1, last.wordCount) - 1;
     return { start, end };
   }, [currentSegments]);
-  const docKey = useMemo(() => {
-    if (sourceKind === 'pdf' && primaryFileMeta) {
-      return `reader:pdf:${primaryFileMeta.name}:${primaryFileMeta.size}:${primaryFileMeta.lastModified}`;
-    }
-    if (primaryFileMeta) {
-      return `reader:text:${primaryFileMeta.name}:${primaryFileMeta.size}:${primaryFileMeta.lastModified}`;
-    }
-    if (!sourceText.trim()) return '';
-    return `reader:text:${hashText(sourceText)}`;
-  }, [primaryFileMeta, sourceKind, sourceText]);
+  const docKey = useMemo(
+    () => buildDocumentKey(sourceKind, primaryFileMeta, sourceText),
+    [primaryFileMeta, sourceKind, sourceText],
+  );
 
   const saveTimerRef = useRef<number | null>(null);
   const saveIdleRef = useRef<number | null>(null);
@@ -790,6 +1002,9 @@ function App() {
   const tokensRef = useRef<string[]>([]);
   const segmentsRef = useRef<Segment[]>([]);
   const segmentStartIndicesRef = useRef<number[]>([]);
+  const readerDisplayRef = useRef<HTMLDivElement | null>(null);
+  const measureCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fitScaleRef = useRef(1);
   const conventionalRef = useRef<HTMLDivElement | null>(null);
   const conventionalChunkHeightsRef = useRef<number[]>([]);
   const conventionalAvgChunkHeightRef = useRef(DEFAULT_CONVENTIONAL_CHUNK_HEIGHT);
@@ -860,6 +1075,89 @@ function App() {
   }, [isPlaying]);
 
   useEffect(() => {
+    fitScaleRef.current = fitScale;
+  }, [fitScale]);
+
+  useLayoutEffect(() => {
+    if (typeof window === 'undefined') return;
+    const element = readerDisplayRef.current;
+    if (!element) return;
+    const updateSize = () => {
+      setReaderDisplayWidth(element.clientWidth);
+    };
+    updateSize();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateSize);
+      return () => {
+        window.removeEventListener('resize', updateSize);
+      };
+    }
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      setReaderDisplayWidth(entry.contentRect.width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!singleWordMode) {
+      if (fitScaleRef.current !== 1) {
+        setFitScale(1);
+      }
+      return;
+    }
+    if (typeof window === 'undefined') {
+      if (fitScaleRef.current !== fallbackFitScale) {
+        setFitScale(fallbackFitScale);
+      }
+      return;
+    }
+    const element = readerDisplayRef.current;
+    if (!element || !currentSegmentText.trim()) {
+      if (fitScaleRef.current !== fallbackFitScale) {
+        setFitScale(fallbackFitScale);
+      }
+      return;
+    }
+    const styles = window.getComputedStyle(element);
+    const paddingLeft = parseFloat(styles.paddingLeft) || 0;
+    const paddingRight = parseFloat(styles.paddingRight) || 0;
+    const availableWidth = element.clientWidth - paddingLeft - paddingRight;
+    if (availableWidth <= 0) {
+      if (fitScaleRef.current !== fallbackFitScale) {
+        setFitScale(fallbackFitScale);
+      }
+      return;
+    }
+    const fontSize = parseFloat(styles.fontSize) || 16;
+    const baseFontSize = fontSize / Math.max(0.1, fitScaleRef.current);
+    const font = `${styles.fontWeight} ${baseFontSize}px ${styles.fontFamily}`;
+    const canvas = measureCanvasRef.current ?? document.createElement('canvas');
+    measureCanvasRef.current = canvas;
+    const context = canvas.getContext('2d');
+    if (!context) {
+      if (fitScaleRef.current !== fallbackFitScale) {
+        setFitScale(fallbackFitScale);
+      }
+      return;
+    }
+    context.font = font;
+    const textWidth = context.measureText(currentSegmentText).width;
+    if (!textWidth) {
+      if (fitScaleRef.current !== fallbackFitScale) {
+        setFitScale(fallbackFitScale);
+      }
+      return;
+    }
+    const nextScale = clamp(availableWidth / textWidth, 0.35, 1);
+    if (Math.abs(nextScale - fitScaleRef.current) > 0.01) {
+      setFitScale(nextScale);
+    }
+  }, [currentSegmentText, displayScale, fallbackFitScale, readerDisplayWidth, singleWordMode]);
+
+  useEffect(() => {
     conventionalSeekEnabledRef.current = conventionalSeekEnabled;
   }, [conventionalSeekEnabled]);
 
@@ -880,7 +1178,7 @@ function App() {
   }, [granularity]);
 
   useEffect(() => {
-    if (granularity === 'sentence' && chunkSize !== 1) {
+    if ((granularity === 'sentence' || granularity === 'tweet') && chunkSize !== 1) {
       setChunkSize(1);
     }
   }, [chunkSize, granularity]);
@@ -1085,7 +1383,9 @@ function App() {
       const nextSegments =
         granularityRef.current === 'sentence'
           ? segmentTextBySentence(deferredSourceText)
-          : segmentTokens(nextTokens, granularityRef.current);
+          : granularityRef.current === 'tweet'
+            ? segmentTextByTweet(deferredSourceText)
+            : segmentTokens(nextTokens, granularityRef.current);
       setSegments(nextSegments);
       setIsIndexingPrimary(false);
       return;
@@ -1127,7 +1427,9 @@ function App() {
     const nextSegments =
       granularity === 'sentence'
         ? segmentTextBySentence(deferredSourceText)
-        : segmentTokens(tokens, granularity);
+        : granularity === 'tweet'
+          ? segmentTextByTweet(deferredSourceText)
+          : segmentTokens(tokens, granularity);
     setSegments(nextSegments);
     setIsIndexingPrimary(false);
   }, [canUseWorker, deferredSourceText, granularity, tokens, workerReady]);
@@ -1202,7 +1504,7 @@ function App() {
       if (typeof parsed.title === 'string' && parsed.title.trim()) {
         setTitle(parsed.title);
       }
-      if (parsed.sourceKind === 'pdf' || parsed.sourceKind === 'text') {
+      if (parsed.sourceKind === 'pdf' || parsed.sourceKind === 'text' || parsed.sourceKind === 'epub') {
         setSourceKind(parsed.sourceKind);
       }
       if (
@@ -1223,6 +1525,22 @@ function App() {
           didHydrateRef.current = true;
         }
       });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const hydrateHistory = async () => {
+      const docs = await readStoredDocumentsFromDb();
+      if (cancelled) return;
+      const sorted = [...docs].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+      setSavedDocuments(sorted);
+    };
+    hydrateHistory().catch((error) => {
+      console.warn('Failed to hydrate stored document history.', error);
+    });
     return () => {
       cancelled = true;
     };
@@ -1269,6 +1587,12 @@ function App() {
       if (typeof parsed.cameraPreview === 'boolean') {
         setCameraPreview(parsed.cameraPreview);
       }
+      if (typeof parsed.displayScale === 'number') {
+        setDisplayScale(clamp(parsed.displayScale, 0.8, 1.35));
+      }
+      if (typeof parsed.longWordSlowdown === 'number') {
+        setLongWordSlowdown(clamp(parsed.longWordSlowdown, 0, 80));
+      }
     } catch {
       // Ignore invalid preference data.
     } finally {
@@ -1298,6 +1622,8 @@ function App() {
           cameraHandEnabled,
           cameraEyeEnabled,
           cameraPreview,
+          displayScale,
+          longWordSlowdown,
         };
         try {
           window.localStorage.setItem(USER_PREFERENCES_KEY, JSON.stringify(payload));
@@ -1323,6 +1649,8 @@ function App() {
     cameraHandEnabled,
     cameraPreview,
     conventionalSeekEnabled,
+    displayScale,
+    longWordSlowdown,
     showConventional,
     viewMode,
   ]);
@@ -1683,7 +2011,8 @@ function App() {
         parsed.granularity === 'word' ||
         parsed.granularity === 'bigram' ||
         parsed.granularity === 'trigram' ||
-        parsed.granularity === 'sentence'
+        parsed.granularity === 'sentence' ||
+        parsed.granularity === 'tweet'
       ) {
         setGranularity(parsed.granularity);
       } else {
@@ -1794,7 +2123,11 @@ function App() {
     const wordsInChunk = Math.max(1, currentSegmentWordCount || 1);
     const baseIntervalMs = (60000 / Math.max(60, wpm)) * wordsInChunk;
     const minIntervalMs = Math.max(baseIntervalMs, minWordMs * wordsInChunk);
-    const intervalMs = Math.max(80, minIntervalMs);
+    const chunkText = currentSegments.map((segment) => segment.text).join(' ');
+    const complexityMultiplier = getReadingComplexityMultiplier(chunkText);
+    const slowdownIntensity = longWordSlowdown / 100;
+    const intervalMs =
+      Math.max(80, minIntervalMs) * (1 + (complexityMultiplier - 1) * slowdownIntensity);
     const resumeDelayMs = postPauseDelayRef.current;
     const lastSegmentText = currentSegments[currentSegments.length - 1]?.text ?? '';
     const pauseMs = getSentencePauseMs(lastSegmentText, sentencePauseMs);
@@ -1821,6 +2154,7 @@ function App() {
     segmentStartIndices,
     segments,
     sentencePauseMs,
+    longWordSlowdown,
     ttsEnabled,
     wpm,
   ]);
@@ -2353,6 +2687,11 @@ function App() {
         ? `${findCursor + 1}/${findMatches.length}`
         : '0'
       : '-';
+  const formatStoredDate = useCallback((timestamp: number) => {
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }, []);
   const granularityLabel =
     granularity === 'word'
       ? 'Word'
@@ -2360,8 +2699,9 @@ function App() {
         ? 'Bi-gram'
         : granularity === 'trigram'
           ? 'Tri-gram'
-          : 'Sentence';
-  const singleWordMode = granularity === 'word' && chunkSize === 1;
+          : granularity === 'sentence'
+            ? 'Sentence'
+            : 'Tweet';
 
   const applyPdfRange = useCallback(
     (start: number, end: number, options?: { focusPage?: number; pdfOverride?: PdfState }) => {
@@ -2800,6 +3140,22 @@ function App() {
     [playCue],
   );
 
+  const handleSentenceStep = useCallback(
+    (direction: 'back' | 'next') => {
+      if (!sentenceSegments.length) return;
+      const currentIndex = getSegmentIndexForWordIndex(wordIndexRef.current, sentenceStartIndices);
+      const nextIndex = clamp(
+        currentIndex + (direction === 'back' ? -1 : 1),
+        0,
+        Math.max(0, sentenceSegments.length - 1),
+      );
+      const target = sentenceSegments[nextIndex]?.startIndex ?? wordIndexRef.current;
+      handleSeekRef.current(target, { focusConventional: true });
+      playCue(direction);
+    },
+    [playCue, sentenceSegments, sentenceStartIndices],
+  );
+
   const jumpToFindMatch = useCallback(
     (matchIndex: number) => {
       const target = findMatches[matchIndex];
@@ -2858,6 +3214,25 @@ function App() {
         adjustWpm(-20);
         return;
       }
+      if (event.shiftKey && event.code === 'ArrowLeft') {
+        event.preventDefault();
+        handleSentenceStep('back');
+        return;
+      }
+      if (event.shiftKey && event.code === 'ArrowRight') {
+        event.preventDefault();
+        handleSentenceStep('next');
+        return;
+      }
+      if (key === 'f') {
+        event.preventDefault();
+        if (document.fullscreenElement || viewMode === 'focus' || viewMode === 'focus-text') {
+          handleViewModeChange('deck');
+        } else {
+          handleViewModeChange('focus', { requestFullscreen: true });
+        }
+        return;
+      }
       if (event.code === 'ArrowLeft') {
         event.preventDefault();
         handleTransportStep('back');
@@ -2877,7 +3252,7 @@ function App() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [adjustWpm, handleTogglePlay, handleTransportStep]);
+  }, [adjustWpm, handleSentenceStep, handleTogglePlay, handleTransportStep, handleViewModeChange, viewMode]);
 
   useEffect(() => {
     const pending = pendingBookmarkRef.current;
@@ -3141,7 +3516,7 @@ function App() {
   const loadTextFile = async (
     file: File,
     setNotice: React.Dispatch<React.SetStateAction<Notice | null>>,
-  ) => {
+  ): Promise<{ text: string; wordCount: number }> => {
     if (isPdfFile(file)) {
       setNotice({ kind: 'info', message: 'Reading PDF...' });
       try {
@@ -3152,25 +3527,113 @@ function App() {
         const text = pdfData.pageTexts.join('\n\n');
         if (!text.trim()) {
           setNotice({ kind: 'error', message: 'No text found. Is this a scanned PDF?' });
-          return '';
+          return { text: '', wordCount: 0 };
         }
         const wordCount = pdfData.pageTokenCounts.reduce((sum, count) => sum + count, 0);
         setNotice({ kind: 'success', message: `PDF loaded (${wordCount.toLocaleString()} words)` });
-        return text;
+        return { text, wordCount };
       } catch (error) {
         console.error('Failed to read PDF:', error);
         setNotice({ kind: 'error', message: 'Failed to read PDF.' });
-        return '';
+        return { text: '', wordCount: 0 };
       }
     }
 
     const text = await file.text();
     const wordCount = tokenize(text).length;
     setNotice({ kind: 'success', message: `Text loaded (${wordCount.toLocaleString()} words)` });
-    return text;
+    return { text, wordCount };
   };
 
-  const loadPrimaryPdf = async (file: File) => {
+  const loadEpubFile = async (
+    file: File,
+    setNotice: React.Dispatch<React.SetStateAction<Notice | null>>,
+  ): Promise<{ text: string; wordCount: number }> => {
+    setNotice({ kind: 'info', message: 'Reading EPUB...' });
+    try {
+      const zip = await JSZip.loadAsync(await file.arrayBuffer());
+      const containerEntry = zip.file('META-INF/container.xml');
+      if (!containerEntry) {
+        setNotice({ kind: 'error', message: 'Missing EPUB container.' });
+        return '';
+      }
+      const containerText = await containerEntry.async('string');
+      const parser = new DOMParser();
+      const containerDoc = parser.parseFromString(containerText, 'application/xml');
+      const rootfile = containerDoc.getElementsByTagName('rootfile')[0];
+      const opfPath = rootfile?.getAttribute('full-path');
+      if (!opfPath) {
+        setNotice({ kind: 'error', message: 'EPUB manifest not found.' });
+        return '';
+      }
+      const opfEntry = zip.file(opfPath);
+      if (!opfEntry) {
+        setNotice({ kind: 'error', message: 'EPUB package document missing.' });
+        return '';
+      }
+      const opfText = await opfEntry.async('string');
+      const opfDoc = parser.parseFromString(opfText, 'application/xml');
+      const manifestEl = opfDoc.getElementsByTagName('manifest')[0];
+      const spineEl = opfDoc.getElementsByTagName('spine')[0];
+      if (!manifestEl || !spineEl) {
+        setNotice({ kind: 'error', message: 'Invalid EPUB manifest.' });
+        return '';
+      }
+      const manifestItems = Array.from(manifestEl.getElementsByTagName('item'))
+        .map((item) => ({
+          id: item.getAttribute('id') ?? '',
+          href: item.getAttribute('href') ?? '',
+          mediaType: item.getAttribute('media-type') ?? '',
+        }))
+        .filter((item) => item.id && item.href);
+      const manifestMap = new Map(manifestItems.map((item) => [item.id, item]));
+      const basePath = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+      const spineRefs = Array.from(spineEl.getElementsByTagName('itemref'))
+        .map((item) => item.getAttribute('idref'))
+        .filter((value): value is string => Boolean(value));
+      const readableTypes = new Set(['application/xhtml+xml', 'text/html', 'application/x-dtbook+xml']);
+      const chapters: string[] = [];
+      for (const idref of spineRefs) {
+        const item = manifestMap.get(idref);
+        if (!item || (item.mediaType && !readableTypes.has(item.mediaType))) continue;
+        const resolvedPath = resolveEpubPath(basePath, item.href);
+        if (!resolvedPath) continue;
+        const entry = zip.file(resolvedPath);
+        if (!entry) continue;
+        const html = await entry.async('string');
+        const chapterText = extractEpubHtmlText(html);
+        if (chapterText) chapters.push(chapterText);
+      }
+      if (chapters.length === 0) {
+        const fallbackItems = manifestItems.filter((item) => readableTypes.has(item.mediaType));
+        for (const item of fallbackItems) {
+          const resolvedPath = resolveEpubPath(basePath, item.href);
+          if (!resolvedPath) continue;
+          const entry = zip.file(resolvedPath);
+          if (!entry) continue;
+          const html = await entry.async('string');
+          const chapterText = extractEpubHtmlText(html);
+          if (chapterText) chapters.push(chapterText);
+        }
+      }
+      const combined = chapters.join('\n\n').trim();
+      if (!combined) {
+        setNotice({ kind: 'error', message: 'No readable text found. Is the EPUB DRM-free?' });
+        return { text: '', wordCount: 0 };
+      }
+      const wordCount = tokenize(combined).length;
+      setNotice({ kind: 'success', message: `EPUB loaded (${wordCount.toLocaleString()} words)` });
+      return { text: combined, wordCount };
+    } catch (error) {
+      console.error('Failed to read EPUB:', error);
+      setNotice({ kind: 'error', message: 'Failed to read EPUB.' });
+      return { text: '', wordCount: 0 };
+    }
+  };
+
+  const loadPrimaryPdf = async (
+    file: File,
+  ): Promise<{ pdfState: PdfState; wordCount: number; text: string; pageRange: PageRange } | null> => {
     setIsPdfBusy(true);
     setPrimaryNotice({ kind: 'info', message: 'Reading PDF...' });
     try {
@@ -3188,12 +3651,18 @@ function App() {
           pageTokenCounts: pdfData.pageTokenCounts,
           outline: pdfData.outline,
         };
+        const range = normalizeRange(1, nextPdfState.pageCount, nextPdfState.pageCount);
         setPrimaryNotice({ kind: 'error', message: 'No text found. Is this a scanned PDF?' });
         setSourceKind('pdf');
         setPdfState(nextPdfState);
         setTitle(file.name.replace(/\.[^/.]+$/, ''));
-        applyPdfRange(1, nextPdfState.pageCount, { pdfOverride: nextPdfState });
-        return;
+        applyPdfRange(range.start, range.end, { pdfOverride: nextPdfState });
+        return {
+          pdfState: nextPdfState,
+          wordCount: 0,
+          text: combinedText,
+          pageRange: range,
+        };
       }
       const nextPdfState: PdfState = {
         fileName: file.name,
@@ -3203,14 +3672,17 @@ function App() {
         outline: pdfData.outline,
       };
       const wordCount = pdfData.pageTokenCounts.reduce((sum, count) => sum + count, 0);
+      const range = normalizeRange(1, nextPdfState.pageCount, nextPdfState.pageCount);
       setPdfState(nextPdfState);
       setSourceKind('pdf');
       setTitle(file.name.replace(/\.[^/.]+$/, ''));
-      applyPdfRange(1, nextPdfState.pageCount, { pdfOverride: nextPdfState });
+      applyPdfRange(range.start, range.end, { pdfOverride: nextPdfState });
       setPrimaryNotice({ kind: 'success', message: `PDF loaded (${wordCount.toLocaleString()} words)` });
+      return { pdfState: nextPdfState, wordCount, text: combinedText, pageRange: range };
     } catch (error) {
       console.error('Failed to read PDF:', error);
       setPrimaryNotice({ kind: 'error', message: 'Failed to read PDF.' });
+      return null;
     } finally {
       setIsPdfBusy(false);
     }
@@ -3315,20 +3787,84 @@ function App() {
     }
   };
 
+  const persistStoredDocument = useCallback((doc: StoredDocument) => {
+    void writeStoredDocumentToDb(doc);
+    setSavedDocuments((prev) => {
+      return [doc, ...prev.filter((item) => item.id !== doc.id)];
+    });
+  }, []);
+
+  const handleLoadStoredDocument = useCallback(
+    (doc: StoredDocument) => {
+      const titleValue =
+        doc.title ||
+        doc.primaryFileMeta?.name?.replace(/\.[^/.]+$/, '') ||
+        'Untitled Session';
+      if (doc.sourceKind === 'pdf' && doc.pdfState) {
+        pdfDataRef.current = null;
+        setPdfState(doc.pdfState);
+        setSourceKind('pdf');
+        setPrimaryFileMeta(doc.primaryFileMeta ?? null);
+        const range = doc.pageRange ?? { start: 1, end: doc.pdfState.pageCount };
+        applyPdfRange(range.start, range.end, { pdfOverride: doc.pdfState });
+        setTitle(titleValue);
+      } else {
+        setSourceKind(doc.sourceKind);
+        setPdfState(null);
+        setPageOffsets([]);
+        setPageRange({ start: 1, end: 1 });
+        setPageRangeDraft({ start: 1, end: 1 });
+        startTransition(() => {
+          setSourceText(doc.sourceText);
+          setTitle(titleValue);
+        });
+        setWordIndex(0);
+        setIsPlaying(false);
+        setPrimaryFileMeta(doc.primaryFileMeta ?? null);
+      }
+      setPrimaryNotice({ kind: 'info', message: 'Loaded saved file.' });
+      persistStoredDocument({ ...doc, title: titleValue, updatedAt: Date.now() });
+    },
+    [applyPdfRange, persistStoredDocument],
+  );
+
+  const handleClearStoredDocuments = useCallback(() => {
+    void clearStoredDocumentsFromDb();
+    setSavedDocuments([]);
+  }, []);
+
   const handlePrimaryFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    setPrimaryFileMeta({
+    const nextMeta = {
       name: file.name,
       size: file.size,
       lastModified: file.lastModified,
-    });
+    };
+    setPrimaryFileMeta(nextMeta);
     if (isPdfFile(file)) {
-      await loadPrimaryPdf(file);
+      const result = await loadPrimaryPdf(file);
+      if (result) {
+        const nextDoc: StoredDocument = {
+          id: buildDocumentKey('pdf', nextMeta, result.text),
+          sourceText: result.text,
+          title: file.name.replace(/\.[^/.]+$/, ''),
+          sourceKind: 'pdf',
+          primaryFileMeta: nextMeta,
+          wordCount: result.wordCount,
+          updatedAt: Date.now(),
+          pageRange: result.pageRange,
+          pdfState: result.pdfState,
+        };
+        persistStoredDocument(nextDoc);
+      }
     } else {
-      const text = await loadTextFile(file, setPrimaryNotice);
+      const isEpub = isEpubFile(file);
+      const { text, wordCount } = isEpub
+        ? await loadEpubFile(file, setPrimaryNotice)
+        : await loadTextFile(file, setPrimaryNotice);
       if (text) {
-        setSourceKind('text');
+        setSourceKind(isEpub ? 'epub' : 'text');
         setPdfState(null);
         setPageOffsets([]);
         setPageRange({ start: 1, end: 1 });
@@ -3339,6 +3875,16 @@ function App() {
         });
         setWordIndex(0);
         setIsPlaying(false);
+        const nextDoc: StoredDocument = {
+          id: buildDocumentKey(isEpub ? 'epub' : 'text', nextMeta, text),
+          sourceText: text,
+          title: file.name.replace(/\.[^/.]+$/, ''),
+          sourceKind: isEpub ? 'epub' : 'text',
+          primaryFileMeta: nextMeta,
+          wordCount,
+          updatedAt: Date.now(),
+        };
+        persistStoredDocument(nextDoc);
       }
     }
     event.target.value = '';
@@ -3649,10 +4195,14 @@ function App() {
 
           <div className="load-panel">
             <label className="field file">
-              <span>Import .txt/.md/.pdf</span>
-              <input type="file" accept=".txt,.md,.text,.pdf,application/pdf" onChange={handlePrimaryFile} />
+              <span>Import .txt/.md/.pdf/.epub</span>
+              <input
+                type="file"
+                accept=".txt,.md,.text,.pdf,application/pdf,.epub,application/epub+zip"
+                onChange={handlePrimaryFile}
+              />
             </label>
-            <p className="hint">Drop a text or PDF to load the deck.</p>
+            <p className="hint">Drop a text, EPUB, or PDF to load the deck.</p>
           </div>
           {primaryNotice && (
             <div className="notice-row">
@@ -3663,6 +4213,39 @@ function App() {
             <p className={`notice ${workerNotice.kind}`}>Indexer: {workerNotice.message}</p>
           )}
           {isIndexingPrimary && <p className="hint">Indexing text...</p>}
+
+          {savedDocuments.length > 0 && (
+            <div className="recent-docs">
+              <div className="recent-docs-header">
+                <h3>Recent uploads</h3>
+                <button type="button" className="ghost small" onClick={handleClearStoredDocuments}>
+                  Clear
+                </button>
+              </div>
+              <div className="recent-docs-list">
+                {savedDocuments.map((doc) => (
+                  <button
+                    key={doc.id}
+                    type="button"
+                    className="recent-doc"
+                    onClick={() => handleLoadStoredDocument(doc)}
+                  >
+                    <div className="recent-doc-main">
+                      <span className="recent-doc-title">
+                        {doc.title || doc.primaryFileMeta?.name || 'Untitled Session'}
+                      </span>
+                      <span className="recent-doc-meta">
+                        {doc.sourceKind.toUpperCase()} ·{' '}
+                        {(Number.isFinite(doc.wordCount) ? doc.wordCount : tokenize(doc.sourceText).length).toLocaleString()}{' '}
+                        words
+                      </span>
+                    </div>
+                    <span className="recent-doc-time">{formatStoredDate(doc.updatedAt)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {sourceKind === 'pdf' && pdfState && (
             <div className="pdf-controls">
@@ -3859,7 +4442,7 @@ function App() {
           </div>
 
           <p className="hint">
-            Kindle support requires DRM-free exports. PDF text extraction is best on text-based PDFs.
+            Kindle/EPUB imports require DRM-free exports. PDF text extraction is best on text-based PDFs.
           </p>
 
           <div className="tts-panel">
@@ -3997,7 +4580,7 @@ function App() {
         </section>
 
         <section className="panel reader-panel">
-          <div className="reader-display">
+          <div className="reader-display" style={readerDisplayStyle} ref={readerDisplayRef}>
             <div className="focus-rail" aria-hidden="true" />
             <ReaderDisplay
               currentSegments={currentSegments}
@@ -4044,8 +4627,27 @@ function App() {
                 Next
               </button>
             </div>
+            <div className="controls deck-controls-secondary">
+              <button
+                type="button"
+                className="deck-btn ghost"
+                onClick={() => handleSentenceStep('back')}
+                disabled={!sentenceSegments.length}
+              >
+                Back Sentence
+              </button>
+              <button
+                type="button"
+                className="deck-btn ghost"
+                onClick={() => handleSentenceStep('next')}
+                disabled={!sentenceSegments.length}
+              >
+                Next Sentence
+              </button>
+            </div>
             <p className="deck-hint">
-              Hotkeys: Space play/pause, Left/Right back/next, Up/Down speed, B bookmark, ? help.
+              Hotkeys: Space play/pause, Left/Right back/next, Shift + Left/Right sentence, Up/Down speed, F fullscreen,
+              B bookmark, ? help.
             </p>
           </div>
 
@@ -4062,6 +4664,7 @@ function App() {
                   <option value="bigram">Bi-gram</option>
                   <option value="trigram">Tri-gram</option>
                   <option value="sentence">Sentence</option>
+                  <option value="tweet">Tweet</option>
                 </select>
                 <strong>{granularityLabel}</strong>
               </label>
@@ -4077,6 +4680,20 @@ function App() {
                 <strong>{wpm} wpm</strong>
               </label>
               <label className="slider">
+                <span>Text size</span>
+                <input
+                  type="range"
+                  min={80}
+                  max={135}
+                  value={Math.round(displayScale * 100)}
+                  onChange={(event) => {
+                    const next = Number(event.target.value) / 100;
+                    setDisplayScale(clamp(next, 0.8, 1.35));
+                  }}
+                />
+                <strong>{Math.round(displayScale * 100)}%</strong>
+              </label>
+              <label className="slider">
                 <span>Chunk size</span>
                 <input
                   type="range"
@@ -4084,7 +4701,7 @@ function App() {
                   max={5}
                   value={chunkSize}
                   onChange={(event) => setChunkSize(Number(event.target.value))}
-                  disabled={granularity === 'sentence'}
+                  disabled={granularity === 'sentence' || granularity === 'tweet'}
                 />
                 <strong>
                   {chunkSize} {granularity === 'word' ? 'word' : 'segment'}
@@ -4102,6 +4719,17 @@ function App() {
                   disabled={chunkSize !== 1 || granularity !== 'word'}
                 />
                 <strong>{contextRadius ? `${contextRadius} each side` : 'Off'}</strong>
+              </label>
+              <label className="slider">
+                <span>Long word slowdown</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={80}
+                  value={longWordSlowdown}
+                  onChange={(event) => setLongWordSlowdown(clamp(Number(event.target.value), 0, 80))}
+                />
+                <strong>{longWordSlowdown}%</strong>
               </label>
               <label className="slider">
                 <span>Minimum word time</span>
@@ -4413,6 +5041,10 @@ function App() {
               <span className="hotkey-label">Next</span>
             </div>
             <div className="hotkey-row">
+              <span className="hotkey-key">Shift + ← / →</span>
+              <span className="hotkey-label">Sentence step</span>
+            </div>
+            <div className="hotkey-row">
               <span className="hotkey-key">Up</span>
               <span className="hotkey-label">Faster</span>
             </div>
@@ -4423,6 +5055,10 @@ function App() {
             <div className="hotkey-row">
               <span className="hotkey-key">B</span>
               <span className="hotkey-label">Bookmark</span>
+            </div>
+            <div className="hotkey-row">
+              <span className="hotkey-key">F</span>
+              <span className="hotkey-label">Toggle fullscreen</span>
             </div>
             <div className="hotkey-row">
               <span className="hotkey-key">?</span>

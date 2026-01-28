@@ -280,6 +280,86 @@
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
 }
 
+.recent-docs {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--panel-border);
+}
+
+.recent-docs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recent-docs-header h3 {
+  margin: 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--ink-muted);
+  font-family: var(--deck-font);
+}
+
+.recent-docs-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.recent-doc {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(27, 26, 21, 0.12);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.recent-doc:hover {
+  border-color: rgba(255, 107, 61, 0.45);
+  box-shadow: 0 10px 20px rgba(20, 18, 12, 0.12);
+  transform: translateY(-1px);
+}
+
+.recent-doc-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.recent-doc-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-doc-meta {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-muted);
+}
+
+.recent-doc-time {
+  font-size: 0.7rem;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
 .field-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -504,7 +584,9 @@
   align-items: center;
   justify-content: center;
   padding: 0 32px;
-  font-size: clamp(2rem, 1.6vw + 1.4rem, 3.2rem);
+  --display-scale: 1;
+  --fit-scale: 1;
+  font-size: calc(clamp(2rem, 1.6vw + 1.4rem, 3.2rem) * var(--display-scale) * var(--fit-scale));
   width: 100%;
   max-width: 100%;
   min-width: 0;
@@ -562,6 +644,10 @@
 
 .display-chunk {
   padding: 0 24px;
+  text-align: center;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  hyphens: auto;
 }
 
 .display-stack {
@@ -595,12 +681,31 @@
   min-width: 0;
 }
 
+.deck-controls-secondary {
+  margin-top: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.deck-controls-secondary .deck-btn {
+  min-height: 52px;
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+}
+
 .reader-panel .controls {
   padding: 10px;
   border-radius: 14px;
   background: linear-gradient(145deg, rgba(18, 16, 13, 0.9), rgba(30, 26, 22, 0.82));
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.4), 0 10px 24px rgba(13, 11, 8, 0.2);
+}
+
+.reader-panel .deck-controls-secondary {
+  padding: 8px;
+  border-radius: 12px;
+  background: rgba(12, 11, 9, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: none;
 }
 
 .companion button {
@@ -1975,7 +2080,7 @@
 
   .reader-display {
     padding: 0 20px;
-    font-size: clamp(1.8rem, 5vw, 2.6rem);
+    font-size: calc(clamp(1.8rem, 5vw, 2.6rem) * var(--display-scale) * var(--fit-scale));
   }
 
   .deck-controls .deck-btn {
@@ -1986,6 +2091,11 @@
 
   .deck-controls .deck-btn.primary {
     font-size: 0.95rem;
+  }
+
+  .deck-controls-secondary .deck-btn {
+    min-height: 46px;
+    font-size: 0.7rem;
   }
 
   .bilingual-grid {
@@ -2052,6 +2162,15 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+  }
+
+  .recent-doc {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .recent-doc-time {
+    align-self: flex-end;
   }
 
   .toggle-row {
@@ -2242,6 +2361,11 @@
 
   .deck-controls .deck-btn.primary {
     font-size: 0.88rem;
+  }
+
+  .deck-controls-secondary .deck-btn {
+    min-height: 42px;
+    font-size: 0.66rem;
   }
 
   .reader-display {

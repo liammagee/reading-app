@@ -1,4 +1,11 @@
-import { segmentTextBySentence, segmentTokens, tokenize, type Granularity, type Segment } from './textUtils';
+import {
+  segmentTextBySentence,
+  segmentTextByTweet,
+  segmentTokens,
+  tokenize,
+  type Granularity,
+  type Segment,
+} from './textUtils';
 
 type Kind = 'primary' | 'secondary';
 
@@ -69,6 +76,9 @@ const cache = new Map<number, CacheEntry>();
 const getSegments = (entry: CacheEntry, granularity: Granularity) => {
   if (granularity === 'sentence') {
     return segmentTextBySentence(entry.text);
+  }
+  if (granularity === 'tweet') {
+    return segmentTextByTweet(entry.text);
   }
   return segmentTokens(entry.tokens, granularity);
 };

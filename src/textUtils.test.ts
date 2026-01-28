@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { segmentTextBySentence, segmentTokens, tokenize } from './textUtils';
+import { segmentTextBySentence, segmentTextByTweet, segmentTokens, tokenize } from './textUtils';
 
 describe('segmentTokens', () => {
   it('segments into bigrams', () => {
@@ -33,5 +33,27 @@ describe('segmentTextBySentence', () => {
       'Final line',
     ]);
     expect(segments[1].startIndex).toBe(4);
+  });
+});
+
+describe('segmentTextByTweet', () => {
+  it('groups sentences into tweet-sized chunks', () => {
+    const text = 'First sentence here. Second sentence there. Third sentence now.';
+    const segments = segmentTextByTweet(text, 35);
+    expect(segments.map((segment) => segment.text)).toEqual([
+      'First sentence here.',
+      'Second sentence there.',
+      'Third sentence now.',
+    ]);
+    expect(segments[0].startIndex).toBe(0);
+    expect(segments[1].startIndex).toBe(3);
+  });
+
+  it('splits long sentences into smaller chunks', () => {
+    const text = 'This sentence should be split into smaller chunks because it is long.';
+    const segments = segmentTextByTweet(text, 22);
+    expect(segments.length).toBeGreaterThan(1);
+    expect(segments[0].wordCount).toBeGreaterThan(0);
+    expect(segments[0].startIndex).toBe(0);
   });
 });
