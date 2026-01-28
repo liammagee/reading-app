@@ -4,7 +4,7 @@ export type BookmarkPayload = {
   pageNumber?: number;
   pageOffset?: number;
   docHash?: string;
-  sourceKind?: 'text' | 'pdf';
+  sourceKind?: 'text' | 'pdf' | 'epub';
   title?: string;
 };
 

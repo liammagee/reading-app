@@ -3555,7 +3555,7 @@ function App() {
       const containerEntry = zip.file('META-INF/container.xml');
       if (!containerEntry) {
         setNotice({ kind: 'error', message: 'Missing EPUB container.' });
-        return '';
+        return { text: '', wordCount: 0 };
       }
       const containerText = await containerEntry.async('string');
       const parser = new DOMParser();
@@ -3564,12 +3564,12 @@ function App() {
       const opfPath = rootfile?.getAttribute('full-path');
       if (!opfPath) {
         setNotice({ kind: 'error', message: 'EPUB manifest not found.' });
-        return '';
+        return { text: '', wordCount: 0 };
       }
       const opfEntry = zip.file(opfPath);
       if (!opfEntry) {
         setNotice({ kind: 'error', message: 'EPUB package document missing.' });
-        return '';
+        return { text: '', wordCount: 0 };
       }
       const opfText = await opfEntry.async('string');
       const opfDoc = parser.parseFromString(opfText, 'application/xml');
@@ -3577,7 +3577,7 @@ function App() {
       const spineEl = opfDoc.getElementsByTagName('spine')[0];
       if (!manifestEl || !spineEl) {
         setNotice({ kind: 'error', message: 'Invalid EPUB manifest.' });
-        return '';
+        return { text: '', wordCount: 0 };
       }
       const manifestItems = Array.from(manifestEl.getElementsByTagName('item'))
         .map((item) => ({
