@@ -1618,54 +1618,58 @@ function App() {
       const localDocs = await readStoredDocumentsFromDb();
       if (cancelled) return;
 
+      // Build a set of local file names for matching (case-insensitive)
+      const localFileNames = new Set(
+        localDocs.map((d) => (d.primaryFileMeta?.name || d.title || '').toLowerCase()),
+      );
+      // Build a set of server file names for matching
+      const serverFileNames = new Set(
+        (serverDocs || []).map((d) => (d.fileName || d.title || '').toLowerCase()),
+      );
+
       // Pull: download server docs missing locally
       if (serverDocs?.length) {
-        const localIds = new Set(localDocs.map((d) => d.id));
         for (const serverDoc of serverDocs) {
-          const localId = `reader:${serverDoc.sourceKind}:${serverDoc.fileName}:${serverDoc.fileSize}:0`;
-          if (!localIds.has(localId)) {
-            const blob = await syncService.pullFile(serverDoc.id);
+          const serverName = (serverDoc.fileName || serverDoc.title || '').toLowerCase();
+          if (localFileNames.has(serverName)) continue;
+          const blob = await syncService.pullFile(serverDoc.id);
+          if (cancelled) return;
+          if (blob) {
+            const text = await blob.text();
+            const localId = `reader:${serverDoc.sourceKind}:${serverDoc.fileName}:${serverDoc.fileSize}:0`;
+            const newDoc: StoredDocument = {
+              id: localId,
+              sourceText: text,
+              title: serverDoc.title,
+              sourceKind: serverDoc.sourceKind as StoredDocument['sourceKind'],
+              primaryFileMeta: {
+                name: serverDoc.fileName,
+                size: serverDoc.fileSize,
+                lastModified: 0,
+              },
+              wordCount: serverDoc.wordCount,
+              updatedAt: new Date(serverDoc.updatedAt).getTime(),
+            };
+            await writeStoredDocumentToDb(newDoc);
             if (cancelled) return;
-            if (blob) {
-              const text = await blob.text();
-              const newDoc: StoredDocument = {
-                id: localId,
-                sourceText: text,
-                title: serverDoc.title,
-                sourceKind: serverDoc.sourceKind as StoredDocument['sourceKind'],
-                primaryFileMeta: {
-                  name: serverDoc.fileName,
-                  size: serverDoc.fileSize,
-                  lastModified: 0,
-                },
-                wordCount: serverDoc.wordCount,
-                updatedAt: new Date(serverDoc.updatedAt).getTime(),
-              };
-              await writeStoredDocumentToDb(newDoc);
-              if (cancelled) return;
-              setSavedDocuments((prev) => {
-                if (prev.some((d) => d.id === localId)) return prev;
-                return [newDoc, ...prev];
-              });
-            }
+            setSavedDocuments((prev) => {
+              if (prev.some((d) => d.id === localId)) return prev;
+              return [newDoc, ...prev];
+            });
           }
         }
       }
 
-      // Push: upload local docs missing from server
-      const serverFileKeys = new Set(
-        (serverDocs || []).map((d) => `${d.sourceKind}:${d.fileName}:${d.fileSize}`),
-      );
+      // Push: upload local docs missing from server (content-hash dedup on server prevents real duplication)
       for (const localDoc of localDocs) {
         if (cancelled) return;
         if (!localDoc.sourceText) continue;
-        const fileKey = `${localDoc.sourceKind}:${localDoc.primaryFileMeta?.name || ''}:${localDoc.primaryFileMeta?.size || 0}`;
-        if (!serverFileKeys.has(fileKey)) {
-          const blob = new Blob([localDoc.sourceText], { type: 'text/plain' });
-          const fileName = localDoc.primaryFileMeta?.name || `${localDoc.title || 'untitled'}.txt`;
-          const file = new File([blob], fileName, { type: 'text/plain' });
-          await syncService.pushDocument(file, localDoc.title || 'Untitled', localDoc.sourceKind, localDoc.wordCount);
-        }
+        const localName = (localDoc.primaryFileMeta?.name || localDoc.title || '').toLowerCase();
+        if (serverFileNames.has(localName)) continue;
+        const blob = new Blob([localDoc.sourceText], { type: 'text/plain' });
+        const fileName = localDoc.primaryFileMeta?.name || `${localDoc.title || 'untitled'}.txt`;
+        const file = new File([blob], fileName, { type: 'text/plain' });
+        await syncService.pushDocument(file, localDoc.title || 'Untitled', localDoc.sourceKind, localDoc.wordCount);
       }
 
       // Pull preferences from server and merge
@@ -3949,8 +3953,8 @@ function App() {
     setSavedDocuments((prev) => {
       return [doc, ...prev.filter((item) => item.id !== doc.id)];
     });
-    // Sync: push document to server
-    if (syncService.isAuthenticated()) {
+    // Sync: push document to server (skip docs pulled from server, identified by lastModified === 0)
+    if (syncService.isAuthenticated() && doc.primaryFileMeta?.lastModified !== 0) {
       const blob = new Blob([doc.sourceText], { type: 'text/plain' });
       const fileName = doc.primaryFileMeta?.name || `${doc.title || 'untitled'}.txt`;
       const file = new File([blob], fileName, { type: 'text/plain' });
