@@ -862,6 +862,7 @@ function App() {
   const [wpm, setWpm] = useState(320);
   const [chunkSize, setChunkSize] = useState(1);
   const [granularity, setGranularity] = useState<Granularity>('word');
+  const [sentenceMode, setSentenceMode] = useState(false);
   const [contextRadius, setContextRadius] = useState(0);
   const [minWordMs, setMinWordMs] = useState(160);
   const [sentencePauseMs, setSentencePauseMs] = useState(200);
@@ -3335,12 +3336,12 @@ function App() {
       }
       if (event.code === 'ArrowLeft') {
         event.preventDefault();
-        handleTransportStep('back');
+        sentenceMode ? handleSentenceStep('back') : handleTransportStep('back');
         return;
       }
       if (event.code === 'ArrowRight') {
         event.preventDefault();
-        handleTransportStep('next');
+        sentenceMode ? handleSentenceStep('next') : handleTransportStep('next');
         return;
       }
       if (key === 'b') {
@@ -3352,7 +3353,7 @@ function App() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [adjustWpm, handleSentenceStep, handleTogglePlay, handleTransportStep, handleViewModeChange, viewMode]);
+  }, [adjustWpm, handleSentenceStep, handleTogglePlay, handleTransportStep, handleViewModeChange, sentenceMode, viewMode]);
 
   useEffect(() => {
     const pending = pendingBookmarkRef.current;
@@ -4716,35 +4717,27 @@ function App() {
                 </button>
                 <button
                   type="button"
+                  className={`deck-btn mode ${sentenceMode ? 'active' : ''}`}
+                  onClick={() => setSentenceMode((m) => !m)}
+                  aria-pressed={sentenceMode}
+                >
+                  {sentenceMode ? 'Sentence' : 'Word'}
+                </button>
+                <button
+                  type="button"
                   className="deck-btn back"
-                  onClick={() => handleTransportStep('back')}
-                  disabled={!tokens.length}
+                  onClick={() => sentenceMode ? handleSentenceStep('back') : handleTransportStep('back')}
+                  disabled={sentenceMode ? !sentenceSegments.length : !tokens.length}
                 >
                   Back
                 </button>
                 <button
                   type="button"
                   className="deck-btn next"
-                  onClick={() => handleTransportStep('next')}
-                  disabled={!tokens.length}
+                  onClick={() => sentenceMode ? handleSentenceStep('next') : handleTransportStep('next')}
+                  disabled={sentenceMode ? !sentenceSegments.length : !tokens.length}
                 >
                   Next
-                </button>
-                <button
-                  type="button"
-                  className="deck-btn ghost"
-                  onClick={() => handleSentenceStep('back')}
-                  disabled={!sentenceSegments.length}
-                >
-                  Back Sentence
-                </button>
-                <button
-                  type="button"
-                  className="deck-btn ghost"
-                  onClick={() => handleSentenceStep('next')}
-                  disabled={!sentenceSegments.length}
-                >
-                  Next Sentence
                 </button>
               </div>
               <p className="deck-hint">
