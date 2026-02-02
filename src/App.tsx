@@ -35,6 +35,10 @@ import {
   type Granularity,
   type Segment,
 } from './textUtils';
+import { useAuth } from './auth/useAuth';
+import { syncService } from './sync/SyncService';
+import { useSyncStatus } from './sync/useSyncStatus';
+import { LoginPanel } from './auth/LoginPanel';
 import './App.css';
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -794,7 +798,63 @@ const extractPdfDataMainThread = async (
   }
 };
 
+const SyncStatusPill = memo(() => {
+  const { isAuthenticated, user, logout } = useAuth();
+  const syncStatus = useSyncStatus();
+  const [showLogin, setShowLogin] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+
+  if (showLogin) {
+    return (
+      <div className="sync-login-dropdown">
+        <LoginPanel onClose={() => setShowLogin(false)} />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <button type="button" className="status-pill status-pill--local" onClick={() => setShowLogin(true)} title="Sign in to sync across devices">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Sign in
+      </button>
+    );
+  }
+
+  const statusLabel = syncStatus === 'syncing' ? 'Syncing...' : syncStatus === 'error' ? 'Sync error' : 'Synced';
+  const statusClass = `status-pill status-pill--${syncStatus === 'syncing' ? 'syncing' : syncStatus === 'error' ? 'error' : 'synced'}`;
+
+  return (
+    <span className="sync-status-wrapper">
+      <button type="button" className={statusClass} onClick={() => setShowMenu((v) => !v)} title={`${user?.name || user?.email || 'User'} — ${statusLabel}`}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          {syncStatus === 'syncing' ? (
+            <><path d="M21 12a9 9 0 1 1-6.22-8.56"/><polyline points="21 3 21 9 15 9"/></>
+          ) : (
+            <><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></>
+          )}
+        </svg>
+        {statusLabel}
+      </button>
+      {showMenu && (
+        <div className="sync-menu">
+          <p className="sync-menu-user">{user?.name || user?.email}</p>
+          <button type="button" className="ghost" onClick={() => { logout(); setShowMenu(false); }}>Sign out</button>
+        </div>
+      )}
+    </span>
+  );
+});
+SyncStatusPill.displayName = 'SyncStatusPill';
+
 function App() {
+  const { token: authToken, isAuthenticated } = useAuth();
+
+  // Wire auth token to sync service
+  useEffect(() => {
+    syncService.setToken(authToken);
+  }, [authToken]);
+
   const [title, setTitle] = useState('Untitled Session');
   const [sourceText, setSourceText] = useState(DEFAULT_TEXT);
   const [primaryFileMeta, setPrimaryFileMeta] = useState<FileMeta | null>(null);
@@ -1546,6 +1606,34 @@ function App() {
     };
   }, []);
 
+  // Sync: pull documents and preferences from server when authenticated
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+    (async () => {
+      // Pull preferences from server and merge
+      const serverPrefs = await syncService.pullPreferences();
+      if (cancelled) return;
+      if (serverPrefs?.preferences && typeof serverPrefs.preferences === 'object') {
+        const prefs = serverPrefs.preferences as Record<string, unknown>;
+        // Merge server preferences with local (server wins if newer)
+        const localRaw = window.localStorage.getItem(USER_PREFERENCES_KEY);
+        if (!localRaw) {
+          window.localStorage.setItem(USER_PREFERENCES_KEY, JSON.stringify(prefs));
+        }
+      }
+      if (serverPrefs?.streak && typeof serverPrefs.streak === 'object') {
+        const localRaw = window.localStorage.getItem(STREAK_STORAGE_KEY);
+        if (!localRaw) {
+          window.localStorage.setItem(STREAK_STORAGE_KEY, JSON.stringify(serverPrefs.streak));
+        }
+      }
+    })().catch((error) => {
+      console.warn('Failed to pull sync data from server.', error);
+    });
+    return () => { cancelled = true; };
+  }, [isAuthenticated]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const saved = window.localStorage.getItem(USER_PREFERENCES_KEY);
@@ -1627,6 +1715,10 @@ function App() {
         };
         try {
           window.localStorage.setItem(USER_PREFERENCES_KEY, JSON.stringify(payload));
+          // Sync preferences to server
+          if (syncService.isAuthenticated()) {
+            syncService.pushPreferences({ preferences: payload });
+          }
         } catch (error) {
           console.warn('Failed to persist user preferences.', error);
         }
@@ -2069,6 +2161,10 @@ function App() {
           updatedAt: Date.now(),
         };
         localStorage.setItem(docKey, JSON.stringify(payload));
+        // Sync session to server (uses docKey as the server document ID reference)
+        if (syncService.isAuthenticated() && docKey) {
+          syncService.pushSession(docKey, payload);
+        }
       }, 1500);
     }, 300);
     return () => {
@@ -2598,6 +2694,10 @@ function App() {
     if (typeof window === 'undefined') return;
     const payload = { dailyGoalWords, stats: streakStats };
     window.localStorage.setItem(STREAK_STORAGE_KEY, JSON.stringify(payload));
+    // Sync streak to server
+    if (syncService.isAuthenticated()) {
+      syncService.pushPreferences({ streak: payload });
+    }
   }, [dailyGoalWords, streakStats]);
 
   useEffect(() => {
@@ -3831,6 +3931,10 @@ function App() {
   const handleClearStoredDocuments = useCallback(() => {
     void clearStoredDocumentsFromDb();
     setSavedDocuments([]);
+    // Sync: delete all documents on server
+    if (syncService.isAuthenticated()) {
+      void syncService.pushDeleteAll();
+    }
   }, []);
 
   const handlePrimaryFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -4163,7 +4267,7 @@ function App() {
             </button>
           </div>
           <div className="session-actions">
-            <span className="status-pill">Local</span>
+            <SyncStatusPill />
             <button
               type="button"
               className="reset-btn"
