@@ -4683,78 +4683,80 @@ function App() {
           </div>
         </section>
 
-        <section className="panel reader-panel">
-          <div className="reader-display" style={readerDisplayStyle} ref={readerDisplayRef}>
-            <div className="focus-rail" aria-hidden="true" />
-            <ReaderDisplay
-              currentSegments={currentSegments}
-              currentSegmentText={currentSegmentText}
-              singleWordMode={singleWordMode}
-              contextRadius={contextRadius}
-              tokens={tokens}
-              wordIndex={wordIndex}
-            />
-          </div>
+        <section className="panel reader-panel reader-sticky">
+            <div className="reader-display" style={readerDisplayStyle} ref={readerDisplayRef}>
+              <div className="focus-rail" aria-hidden="true" />
+              <ReaderDisplay
+                currentSegments={currentSegments}
+                currentSegmentText={currentSegmentText}
+                singleWordMode={singleWordMode}
+                contextRadius={contextRadius}
+                tokens={tokens}
+                wordIndex={wordIndex}
+              />
+            </div>
 
-          <div className="deck-panel">
-            <div className="deck-header">
-              <span className="deck-label">Main Deck</span>
-              <span className={`deck-led ${isPlaying ? 'live' : ''}`} aria-hidden="true" />
+            <div className="deck-panel">
+              <div className="deck-header">
+                <span className="deck-label">Main Deck</span>
+                <span className={`deck-led ${isPlaying ? 'live' : ''}`} aria-hidden="true" />
+              </div>
+              <div className="controls deck-controls">
+                <button
+                  type="button"
+                  className={`deck-btn primary ${isPlaying ? 'live' : ''}`}
+                  aria-pressed={isPlaying}
+                  onClick={handleTogglePlay}
+                  disabled={!tokens.length}
+                >
+                  {isPlaying ? 'Pause' : 'Start'}
+                </button>
+                <button type="button" className="deck-btn ghost" onClick={handleBookmark} disabled={!tokens.length}>
+                  Bookmark
+                </button>
+                <button
+                  type="button"
+                  className="deck-btn back"
+                  onClick={() => handleTransportStep('back')}
+                  disabled={!tokens.length}
+                >
+                  Back
+                </button>
+                <button
+                  type="button"
+                  className="deck-btn next"
+                  onClick={() => handleTransportStep('next')}
+                  disabled={!tokens.length}
+                >
+                  Next
+                </button>
+              </div>
+              <div className="controls deck-controls-secondary">
+                <button
+                  type="button"
+                  className="deck-btn ghost"
+                  onClick={() => handleSentenceStep('back')}
+                  disabled={!sentenceSegments.length}
+                >
+                  Back Sentence
+                </button>
+                <button
+                  type="button"
+                  className="deck-btn ghost"
+                  onClick={() => handleSentenceStep('next')}
+                  disabled={!sentenceSegments.length}
+                >
+                  Next Sentence
+                </button>
+              </div>
+              <p className="deck-hint">
+                Hotkeys: Space play/pause, Left/Right back/next, Shift + Left/Right sentence, Up/Down speed, F fullscreen,
+                B bookmark, ? help.
+              </p>
             </div>
-            <div className="controls deck-controls">
-              <button
-                type="button"
-                className={`deck-btn primary ${isPlaying ? 'live' : ''}`}
-                aria-pressed={isPlaying}
-                onClick={handleTogglePlay}
-                disabled={!tokens.length}
-              >
-                {isPlaying ? 'Pause' : 'Start'}
-              </button>
-              <button type="button" className="deck-btn ghost" onClick={handleBookmark} disabled={!tokens.length}>
-                Bookmark
-              </button>
-              <button
-                type="button"
-                className="deck-btn back"
-                onClick={() => handleTransportStep('back')}
-                disabled={!tokens.length}
-              >
-                Back
-              </button>
-              <button
-                type="button"
-                className="deck-btn next"
-                onClick={() => handleTransportStep('next')}
-                disabled={!tokens.length}
-              >
-                Next
-              </button>
-            </div>
-            <div className="controls deck-controls-secondary">
-              <button
-                type="button"
-                className="deck-btn ghost"
-                onClick={() => handleSentenceStep('back')}
-                disabled={!sentenceSegments.length}
-              >
-                Back Sentence
-              </button>
-              <button
-                type="button"
-                className="deck-btn ghost"
-                onClick={() => handleSentenceStep('next')}
-                disabled={!sentenceSegments.length}
-              >
-                Next Sentence
-              </button>
-            </div>
-            <p className="deck-hint">
-              Hotkeys: Space play/pause, Left/Right back/next, Shift + Left/Right sentence, Up/Down speed, F fullscreen,
-              B bookmark, ? help.
-            </p>
-          </div>
+        </section>
 
+        <section className="panel reader-panel reader-controls-panel">
           <div className="mixer-panel">
             <div className="mixer-header">
               <span className="mixer-label">Mixer</span>

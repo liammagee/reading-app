@@ -6,7 +6,6 @@
   flex-direction: column;
   gap: 32px;
   width: 100%;
-  overflow-x: hidden;
 }
 
 .app-shell.view-mobile {
@@ -388,7 +387,7 @@
   gap: 24px;
   width: 100%;
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .panel {
@@ -749,6 +748,20 @@
   background: rgba(255, 255, 255, 0.95);
   padding: 8px 10px;
   font-size: 0.95rem;
+}
+
+.reader-panel {
+  overflow: visible;
+}
+
+.reader-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.reader-controls-panel {
+  /* Non-sticky controls below the reader */
 }
 
 .reader-display {
