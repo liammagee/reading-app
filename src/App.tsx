@@ -1612,6 +1612,45 @@ function App() {
     if (!isAuthenticated) return;
     let cancelled = false;
     (async () => {
+      // Pull document list from server and merge with local IndexedDB
+      const serverDocs = await syncService.pullDocumentList();
+      if (cancelled) return;
+      if (serverDocs?.length) {
+        const localDocs = await readStoredDocumentsFromDb();
+        const localIds = new Set(localDocs.map((d) => d.id));
+        for (const serverDoc of serverDocs) {
+          // Build the local ID the server doc would have
+          const localId = `reader:${serverDoc.sourceKind}:${serverDoc.fileName}:${serverDoc.fileSize}:0`;
+          if (!localIds.has(localId)) {
+            // Download the file content from server
+            const blob = await syncService.pullFile(serverDoc.id);
+            if (cancelled) return;
+            if (blob) {
+              const text = await blob.text();
+              const newDoc: StoredDocument = {
+                id: localId,
+                sourceText: text,
+                title: serverDoc.title,
+                sourceKind: serverDoc.sourceKind as StoredDocument['sourceKind'],
+                primaryFileMeta: {
+                  name: serverDoc.fileName,
+                  size: serverDoc.fileSize,
+                  lastModified: 0,
+                },
+                wordCount: serverDoc.wordCount,
+                updatedAt: new Date(serverDoc.updatedAt).getTime(),
+              };
+              await writeStoredDocumentToDb(newDoc);
+              if (cancelled) return;
+              setSavedDocuments((prev) => {
+                if (prev.some((d) => d.id === localId)) return prev;
+                return [newDoc, ...prev];
+              });
+            }
+          }
+        }
+      }
+
       // Pull preferences from server and merge
       const serverPrefs = await syncService.pullPreferences();
       if (cancelled) return;
@@ -3893,6 +3932,13 @@ function App() {
     setSavedDocuments((prev) => {
       return [doc, ...prev.filter((item) => item.id !== doc.id)];
     });
+    // Sync: push document to server
+    if (syncService.isAuthenticated()) {
+      const blob = new Blob([doc.sourceText], { type: 'text/plain' });
+      const fileName = doc.primaryFileMeta?.name || `${doc.title || 'untitled'}.txt`;
+      const file = new File([blob], fileName, { type: 'text/plain' });
+      void syncService.pushDocument(file, doc.title || 'Untitled', doc.sourceKind, doc.wordCount);
+    }
   }, []);
 
   const handleLoadStoredDocument = useCallback(
