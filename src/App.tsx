@@ -1615,14 +1615,15 @@ function App() {
       // Pull document list from server and merge with local IndexedDB
       const serverDocs = await syncService.pullDocumentList();
       if (cancelled) return;
+      const localDocs = await readStoredDocumentsFromDb();
+      if (cancelled) return;
+
+      // Pull: download server docs missing locally
       if (serverDocs?.length) {
-        const localDocs = await readStoredDocumentsFromDb();
         const localIds = new Set(localDocs.map((d) => d.id));
         for (const serverDoc of serverDocs) {
-          // Build the local ID the server doc would have
           const localId = `reader:${serverDoc.sourceKind}:${serverDoc.fileName}:${serverDoc.fileSize}:0`;
           if (!localIds.has(localId)) {
-            // Download the file content from server
             const blob = await syncService.pullFile(serverDoc.id);
             if (cancelled) return;
             if (blob) {
@@ -1648,6 +1649,22 @@ function App() {
               });
             }
           }
+        }
+      }
+
+      // Push: upload local docs missing from server
+      const serverFileKeys = new Set(
+        (serverDocs || []).map((d) => `${d.sourceKind}:${d.fileName}:${d.fileSize}`),
+      );
+      for (const localDoc of localDocs) {
+        if (cancelled) return;
+        if (!localDoc.sourceText) continue;
+        const fileKey = `${localDoc.sourceKind}:${localDoc.primaryFileMeta?.name || ''}:${localDoc.primaryFileMeta?.size || 0}`;
+        if (!serverFileKeys.has(fileKey)) {
+          const blob = new Blob([localDoc.sourceText], { type: 'text/plain' });
+          const fileName = localDoc.primaryFileMeta?.name || `${localDoc.title || 'untitled'}.txt`;
+          const file = new File([blob], fileName, { type: 'text/plain' });
+          await syncService.pushDocument(file, localDoc.title || 'Untitled', localDoc.sourceKind, localDoc.wordCount);
         }
       }
 
