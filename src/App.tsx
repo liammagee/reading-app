@@ -4730,8 +4730,6 @@ function App() {
                 >
                   Next
                 </button>
-              </div>
-              <div className="controls deck-controls-secondary">
                 <button
                   type="button"
                   className="deck-btn ghost"

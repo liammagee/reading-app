@@ -279,6 +279,13 @@
   font-family: var(--deck-font);
 }
 
+.login-sent-msg {
+  font-size: 0.75rem;
+  color: rgba(245, 241, 232, 0.8);
+  line-height: 1.5;
+  margin: 0 0 8px;
+}
+
 .login-toggle {
   font-size: 0.65rem;
   color: rgba(244, 239, 228, 0.5);
@@ -1159,8 +1166,8 @@
 
 .deck-controls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
   justify-items: center;
   min-width: 0;
   width: 100%;
@@ -1169,17 +1176,17 @@
 
 .deck-controls .deck-btn {
   border: none;
-  border-radius: 12px;
-  padding: 12px;
-  font-size: 0.9rem;
+  border-radius: 10px;
+  padding: 8px;
+  font-size: 0.75rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.14em;
   color: #fff;
   background: linear-gradient(145deg, #f36d3f, #d34721);
-  box-shadow: 0 14px 24px rgba(228, 87, 46, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  box-shadow: 0 10px 18px rgba(228, 87, 46, 0.3), inset 0 0 0 1px rgba(255, 255, 255, 0.16);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
-  min-height: clamp(86px, 16vw, 140px);
+  min-height: clamp(52px, 10vw, 80px);
   width: 100%;
   max-width: 190px;
   min-width: 0;
@@ -1192,9 +1199,9 @@
 }
 
 .deck-controls .deck-btn.primary {
-  font-size: 1.05rem;
+  font-size: 0.85rem;
   background: linear-gradient(145deg, #ff8a5a, #e4572e);
-  box-shadow: 0 18px 30px rgba(228, 87, 46, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  box-shadow: 0 14px 24px rgba(228, 87, 46, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.2);
 }
 
 .deck-controls .deck-btn.back {
@@ -2279,18 +2286,13 @@
   }
 
   .deck-controls .deck-btn {
-    min-height: clamp(80px, 22vw, 120px);
-    font-size: 0.85rem;
-    letter-spacing: 0.12em;
+    min-height: clamp(44px, 10vw, 70px);
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
   }
 
   .deck-controls .deck-btn.primary {
-    font-size: 0.95rem;
-  }
-
-  .deck-controls-secondary .deck-btn {
-    min-height: 46px;
-    font-size: 0.7rem;
+    font-size: 0.78rem;
   }
 
   .bilingual-grid {
@@ -2337,12 +2339,12 @@
   }
 
   .deck-controls {
-    gap: 10px;
+    gap: 8px;
   }
 
   .deck-controls .deck-btn {
-    min-height: clamp(74px, 24vw, 110px);
-    font-size: 0.82rem;
+    min-height: clamp(40px, 10vw, 65px);
+    font-size: 0.68rem;
   }
 
   .companion button {
@@ -2548,19 +2550,14 @@
   }
 
   .deck-controls .deck-btn {
-    min-height: 70px;
-    border-radius: 10px;
-    font-size: 0.78rem;
+    min-height: 48px;
+    border-radius: 8px;
+    font-size: 0.66rem;
     touch-action: manipulation;
   }
 
   .deck-controls .deck-btn.primary {
-    font-size: 0.88rem;
-  }
-
-  .deck-controls-secondary .deck-btn {
-    min-height: 42px;
-    font-size: 0.66rem;
+    font-size: 0.74rem;
   }
 
   .reader-display {
@@ -2667,7 +2664,7 @@
   }
 
   .deck-controls .deck-btn {
-    min-height: 64px;
-    font-size: 0.72rem;
+    min-height: 44px;
+    font-size: 0.64rem;
   }
 }

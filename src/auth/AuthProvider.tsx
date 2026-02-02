@@ -125,43 +125,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const login = useCallback(async (email: string, password: string) => {
+  const requestMagicLink = useCallback(async (email: string): Promise<{ token?: string }> => {
     setError(null);
     try {
-      const res = await fetch(buildApiUrl('/api/auth/login'), {
+      const res = await fetch(buildApiUrl('/api/auth/magic-link'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Login failed');
+      if (!res.ok) throw new Error(data.error || 'Failed to send login link');
+      // In dev mode, the server returns the token directly for auto-verify
+      return { token: data.token };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to send login link';
+      setError(msg);
+      throw err;
+    }
+  }, []);
+
+  const verifyMagicLink = useCallback(async (magicToken: string) => {
+    setError(null);
+    try {
+      const res = await fetch(buildApiUrl('/api/auth/magic-link/verify'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: magicToken }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Verification failed');
       const t = data.token || data.accessToken;
       const u = data.user;
       persistAuth(t, { id: u.id, email: u.email, name: u.name, role: u.role });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Login failed';
+      const msg = err instanceof Error ? err.message : 'Verification failed';
       setError(msg);
       throw err;
     }
   }, [persistAuth]);
-
-  const register = useCallback(async (email: string, password: string, name?: string) => {
-    setError(null);
-    try {
-      const res = await fetch(buildApiUrl('/api/auth/register'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, name }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Registration failed');
-      await login(email, password);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Registration failed';
-      setError(msg);
-      throw err;
-    }
-  }, [login]);
 
   const logout = useCallback(() => {
     if (token) {
@@ -178,8 +179,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     token,
     isAuthenticated: !!user && !!token,
     isLoading,
-    login,
-    register,
+    requestMagicLink,
+    verifyMagicLink,
     logout,
     error,
   };
