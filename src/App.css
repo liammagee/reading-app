@@ -299,6 +299,34 @@
   font-size: 0.65rem;
 }
 
+.library-btn {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-family: var(--deck-font);
+  background: rgba(18, 16, 14, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(244, 239, 228, 0.8);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.library-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.library-btn.active {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
 .reset-btn {
   display: flex;
   align-items: center;
@@ -347,6 +375,11 @@
 
 .app-shell.view-focus-text .source-panel {
   display: none;
+}
+
+.app-shell.view-focus .source-panel.show-library,
+.app-shell.view-focus-text .source-panel.show-library {
+  display: flex;
 }
 
 .app-shell.view-focus-text .companion-panel {
@@ -2552,6 +2585,7 @@
     border-radius: 8px;
   }
 
+  .library-btn,
   .reset-btn {
     padding: 6px 12px;
     font-size: 0.62rem;
@@ -2667,6 +2701,7 @@
     justify-content: center;
   }
 
+  .library-btn,
   .reset-btn {
     flex: 1;
     justify-content: center;

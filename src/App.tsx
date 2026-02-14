@@ -76,6 +76,7 @@ type LastDocument = {
 
 type UserPreferences = {
   showConventional?: boolean;
+  showReaderDisplay?: boolean;
   conventionalSeekEnabled?: boolean;
   autoFollowConventional?: boolean;
   audioCuesEnabled?: boolean;
@@ -652,6 +653,19 @@ const isEpubFile = (file: File) => {
   return file.type === 'application/epub+zip' || name.endsWith('.epub');
 };
 
+const isHtmlFile = (file: File) => {
+  const name = file.name.toLowerCase();
+  return file.type === 'text/html' || name.endsWith('.html') || name.endsWith('.htm');
+};
+
+const isDocxFile = (file: File) => {
+  const name = file.name.toLowerCase();
+  return (
+    file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    name.endsWith('.docx')
+  );
+};
+
 const resolveEpubPath = (basePath: string, href: string) => {
   const cleaned = href.split('#')[0]?.split('?')[0]?.trim();
   if (!cleaned || /^[a-z]+:\/\//i.test(cleaned)) return null;
@@ -895,8 +909,10 @@ function App() {
   const [wordIndex, setWordIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [showHotkeys, setShowHotkeys] = useState(false);
+  const [showLibrary, setShowLibrary] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('deck');
   const [showConventional, setShowConventional] = useState(true);
+  const [showReaderDisplay, setShowReaderDisplay] = useState(true);
   const [conventionalMode, setConventionalMode] = useState<'excerpt' | 'rendered'>(() => {
     if (typeof window === 'undefined') return 'rendered';
     const stored = window.localStorage.getItem(CONVENTIONAL_MODE_KEY);
@@ -1063,6 +1079,7 @@ function App() {
   const tokensRef = useRef<string[]>([]);
   const segmentsRef = useRef<Segment[]>([]);
   const segmentStartIndicesRef = useRef<number[]>([]);
+  const sourcePanelRef = useRef<HTMLElement | null>(null);
   const readerDisplayRef = useRef<HTMLDivElement | null>(null);
   const measureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fitScaleRef = useRef(1);
@@ -1707,6 +1724,9 @@ function App() {
       if (typeof parsed.showConventional === 'boolean') {
         setShowConventional(parsed.showConventional);
       }
+      if (typeof parsed.showReaderDisplay === 'boolean') {
+        setShowReaderDisplay(parsed.showReaderDisplay);
+      }
       if (typeof parsed.conventionalSeekEnabled === 'boolean') {
         setConventionalSeekEnabled(parsed.conventionalSeekEnabled);
       }
@@ -1763,6 +1783,7 @@ function App() {
       prefsIdleRef.current = scheduleIdle(() => {
         const payload: UserPreferences = {
           showConventional,
+          showReaderDisplay,
           conventionalSeekEnabled,
           autoFollowConventional,
           audioCuesEnabled,
@@ -1805,6 +1826,7 @@ function App() {
     displayScale,
     longWordSlowdown,
     showConventional,
+    showReaderDisplay,
     viewMode,
   ]);
 
@@ -3263,6 +3285,7 @@ function App() {
   const handleViewModeChange = useCallback(
     (mode: ViewMode, options?: { requestFullscreen?: boolean }) => {
       setViewMode(mode);
+      setShowLibrary(false);
       if (mode === 'focus' || mode === 'focus-text') {
         if (options?.requestFullscreen) {
           void requestFullscreen();
@@ -3385,6 +3408,27 @@ function App() {
         handleSentenceStep('next');
         return;
       }
+      if (key === 'v') {
+        event.preventDefault();
+        if (showReaderDisplay && showConventional) {
+          // Both → text-only
+          setShowReaderDisplay(false);
+          setAutoFollowConventional(true);
+          if (viewMode === 'focus') handleViewModeChange('focus-text');
+        } else if (!showReaderDisplay && showConventional) {
+          // Text-only → word-only
+          setShowReaderDisplay(true);
+          setShowConventional(false);
+          if (viewMode === 'focus-text') handleViewModeChange('focus');
+        } else {
+          // Word-only (or neither) → both
+          setShowReaderDisplay(true);
+          setShowConventional(true);
+          setAutoFollowConventional(true);
+          if (viewMode === 'focus') handleViewModeChange('focus-text');
+        }
+        return;
+      }
       if (key === 'f') {
         event.preventDefault();
         if (document.fullscreenElement || viewMode === 'focus' || viewMode === 'focus-text') {
@@ -3413,7 +3457,7 @@ function App() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [adjustWpm, handleSentenceStep, handleTogglePlay, handleTransportStep, handleViewModeChange, sentenceMode, viewMode]);
+  }, [adjustWpm, handleSentenceStep, handleTogglePlay, handleTransportStep, handleViewModeChange, sentenceMode, showConventional, showReaderDisplay, viewMode]);
 
   useEffect(() => {
     const pending = pendingBookmarkRef.current;
@@ -3792,6 +3836,52 @@ function App() {
     }
   };
 
+  const loadHtmlFile = async (
+    file: File,
+    setNotice: React.Dispatch<React.SetStateAction<Notice | null>>,
+  ): Promise<{ text: string; wordCount: number }> => {
+    setNotice({ kind: 'info', message: 'Reading HTML...' });
+    try {
+      const rawHtml = await file.text();
+      const text = extractEpubHtmlText(rawHtml);
+      if (!text.trim()) {
+        setNotice({ kind: 'error', message: 'No readable text found in HTML.' });
+        return { text: '', wordCount: 0 };
+      }
+      const wordCount = tokenize(text).length;
+      setNotice({ kind: 'success', message: `HTML loaded (${wordCount.toLocaleString()} words)` });
+      return { text, wordCount };
+    } catch (error) {
+      console.error('Failed to read HTML:', error);
+      setNotice({ kind: 'error', message: 'Failed to read HTML file.' });
+      return { text: '', wordCount: 0 };
+    }
+  };
+
+  const loadDocxFile = async (
+    file: File,
+    setNotice: React.Dispatch<React.SetStateAction<Notice | null>>,
+  ): Promise<{ text: string; wordCount: number }> => {
+    setNotice({ kind: 'info', message: 'Reading Word document...' });
+    try {
+      const mammoth = await import('mammoth');
+      const arrayBuffer = await file.arrayBuffer();
+      const result = await mammoth.default.extractRawText({ arrayBuffer });
+      const text = result.value.replace(/\n{3,}/g, '\n\n').trim();
+      if (!text) {
+        setNotice({ kind: 'error', message: 'No readable text found in document.' });
+        return { text: '', wordCount: 0 };
+      }
+      const wordCount = tokenize(text).length;
+      setNotice({ kind: 'success', message: `Word document loaded (${wordCount.toLocaleString()} words)` });
+      return { text, wordCount };
+    } catch (error) {
+      console.error('Failed to read DOCX:', error);
+      setNotice({ kind: 'error', message: 'Failed to read Word document.' });
+      return { text: '', wordCount: 0 };
+    }
+  };
+
   const loadPrimaryPdf = async (
     file: File,
   ): Promise<{ pdfState: PdfState; wordCount: number; text: string; pageRange: PageRange } | null> => {
@@ -4032,9 +4122,15 @@ function App() {
       }
     } else {
       const isEpub = isEpubFile(file);
+      const isHtml = isHtmlFile(file);
+      const isDocx = isDocxFile(file);
       const { text, wordCount } = isEpub
         ? await loadEpubFile(file, setPrimaryNotice)
-        : await loadTextFile(file, setPrimaryNotice);
+        : isHtml
+          ? await loadHtmlFile(file, setPrimaryNotice)
+          : isDocx
+            ? await loadDocxFile(file, setPrimaryNotice)
+            : await loadTextFile(file, setPrimaryNotice);
       if (text) {
         setSourceKind(isEpub ? 'epub' : 'text');
         setPdfState(null);
@@ -4338,6 +4434,20 @@ function App() {
             <SyncStatusPill />
             <button
               type="button"
+              className={`library-btn${showLibrary ? ' active' : ''}`}
+              onClick={() => {
+                const isFocusMode = viewMode === 'focus' || viewMode === 'focus-text';
+                if (isFocusMode) {
+                  setShowLibrary((prev) => !prev);
+                } else {
+                  sourcePanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+              }}
+            >
+              Library
+            </button>
+            <button
+              type="button"
               className="reset-btn"
               onClick={() => {
                 handleSeek(0, { pause: true });
@@ -4350,7 +4460,7 @@ function App() {
       </header>
 
       <main className="layout">
-        <section className="panel source-panel">
+        <section className={`panel source-panel${showLibrary ? ' show-library' : ''}`} ref={sourcePanelRef}>
           <div className="panel-header">
             <h2>Source Rack</h2>
             <p>Load a text, then cue up the deck.</p>
@@ -4367,14 +4477,14 @@ function App() {
 
           <div className="load-panel">
             <label className="field file">
-              <span>Import .txt/.md/.pdf/.epub</span>
+              <span>Import .txt/.md/.pdf/.epub/.html/.docx</span>
               <input
                 type="file"
-                accept=".txt,.md,.text,.pdf,application/pdf,.epub,application/epub+zip"
+                accept=".txt,.md,.text,.pdf,application/pdf,.epub,application/epub+zip,.html,.htm,text/html,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 onChange={handlePrimaryFile}
               />
             </label>
-            <p className="hint">Drop a text, EPUB, or PDF to load the deck.</p>
+            <p className="hint">Drop a text, EPUB, PDF, HTML, or Word file to load the deck.</p>
           </div>
           {primaryNotice && (
             <div className="notice-row">
@@ -4752,6 +4862,7 @@ function App() {
         </section>
 
         <section className="panel reader-panel reader-sticky">
+            {showReaderDisplay && (
             <div className="reader-display" style={readerDisplayStyle} ref={readerDisplayRef}>
               <div className="focus-rail" aria-hidden="true" />
               <ReaderDisplay
@@ -4763,6 +4874,7 @@ function App() {
                 wordIndex={wordIndex}
               />
             </div>
+            )}
 
             <div className="deck-panel">
               <div className="deck-header">
@@ -4792,6 +4904,28 @@ function App() {
                 </button>
                 <button
                   type="button"
+                  className="deck-btn mode"
+                  onClick={() => {
+                    if (showReaderDisplay && showConventional) {
+                      setShowReaderDisplay(false);
+                      setAutoFollowConventional(true);
+                      if (viewMode === 'focus') handleViewModeChange('focus-text');
+                    } else if (!showReaderDisplay && showConventional) {
+                      setShowReaderDisplay(true);
+                      setShowConventional(false);
+                      if (viewMode === 'focus-text') handleViewModeChange('focus');
+                    } else {
+                      setShowReaderDisplay(true);
+                      setShowConventional(true);
+                      setAutoFollowConventional(true);
+                      if (viewMode === 'focus') handleViewModeChange('focus-text');
+                    }
+                  }}
+                >
+                  {showReaderDisplay && showConventional ? 'Both' : showReaderDisplay ? 'Word' : 'Text'}
+                </button>
+                <button
+                  type="button"
                   className="deck-btn back"
                   onClick={() => sentenceMode ? handleSentenceStep('back') : handleTransportStep('back')}
                   disabled={sentenceMode ? !sentenceSegments.length : !tokens.length}
@@ -4808,8 +4942,8 @@ function App() {
                 </button>
               </div>
               <p className="deck-hint">
-                Hotkeys: Space play/pause, Left/Right back/next, Shift + Left/Right sentence, Up/Down speed, F fullscreen,
-                B bookmark, ? help.
+                Hotkeys: Space play/pause, Left/Right back/next, Shift + Left/Right sentence, Up/Down speed, V view,
+                F fullscreen, B bookmark, ? help.
               </p>
             </div>
         </section>
@@ -5105,6 +5239,14 @@ function App() {
             <label className="toggle">
               <input
                 type="checkbox"
+                checked={showReaderDisplay}
+                onChange={(event) => setShowReaderDisplay(event.target.checked)}
+              />
+              <span>Show word</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
                 checked={showConventional}
                 onChange={(event) => setShowConventional(event.target.checked)}
               />
@@ -5131,27 +5273,25 @@ function App() {
               Reset view mode
             </button>
             {conventionalMode === 'excerpt' && (
-              <>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={conventionalSeekEnabled}
-                    onChange={(event) => setConventionalSeekEnabled(event.target.checked)}
-                    disabled={!showConventional}
-                  />
-                  <span>Scroll to seek</span>
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={autoFollowConventional}
-                    onChange={(event) => setAutoFollowConventional(event.target.checked)}
-                    disabled={!showConventional}
-                  />
-                  <span>Auto-follow</span>
-                </label>
-              </>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={conventionalSeekEnabled}
+                  onChange={(event) => setConventionalSeekEnabled(event.target.checked)}
+                  disabled={!showConventional}
+                />
+                <span>Scroll to seek</span>
+              </label>
             )}
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={autoFollowConventional}
+                onChange={(event) => setAutoFollowConventional(event.target.checked)}
+                disabled={!showConventional || conventionalMode !== 'excerpt'}
+              />
+              <span>Auto-follow</span>
+            </label>
           </div>
           {showConventional && conventionalMode === 'excerpt' && (
             <p className="hint">Scrolling the excerpt moves the reader to the word near the top edge.</p>
@@ -5219,6 +5359,10 @@ function App() {
             <div className="hotkey-row">
               <span className="hotkey-key">B</span>
               <span className="hotkey-label">Bookmark</span>
+            </div>
+            <div className="hotkey-row">
+              <span className="hotkey-key">V</span>
+              <span className="hotkey-label">Cycle display mode</span>
             </div>
             <div className="hotkey-row">
               <span className="hotkey-key">F</span>
