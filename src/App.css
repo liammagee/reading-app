@@ -797,7 +797,8 @@
   font-size: 0.95rem;
 }
 
-.reader-panel {
+.reader-panel,
+.companion-panel {
   overflow: visible;
 }
 
@@ -2151,7 +2152,6 @@
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
-  scroll-behavior: smooth;
   color: var(--ink);
   word-spacing: 0.02em;
   hanging-punctuation: first allow-end last;

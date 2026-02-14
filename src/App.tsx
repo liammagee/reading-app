@@ -914,9 +914,9 @@ function App() {
   const [showConventional, setShowConventional] = useState(true);
   const [showReaderDisplay, setShowReaderDisplay] = useState(true);
   const [conventionalMode, setConventionalMode] = useState<'excerpt' | 'rendered'>(() => {
-    if (typeof window === 'undefined') return 'rendered';
+    if (typeof window === 'undefined') return 'excerpt';
     const stored = window.localStorage.getItem(CONVENTIONAL_MODE_KEY);
-    return stored === 'excerpt' || stored === 'rendered' ? stored : 'rendered';
+    return stored === 'rendered' ? 'rendered' : 'excerpt';
   });
   const [conventionalWindow, setConventionalWindow] = useState<{ start: number; end: number }>({
     start: 0,
@@ -2233,6 +2233,13 @@ function App() {
   useEffect(() => {
     localStorage.setItem(CONVENTIONAL_MODE_KEY, conventionalMode);
   }, [conventionalMode]);
+
+  // Text-only mode requires excerpt mode for word highlighting and auto-follow
+  useEffect(() => {
+    if (!showReaderDisplay && showConventional && conventionalMode !== 'excerpt') {
+      setConventionalMode('excerpt');
+    }
+  }, [showReaderDisplay, showConventional, conventionalMode]);
 
   useEffect(() => {
     if (!docKey) return;
@@ -3573,7 +3580,7 @@ function App() {
         updateConventionalWindowForChunk(chunkIndex);
       });
     }
-    if (!conventionalSeekEnabledRef.current || scrollLockRef.current) return;
+    if (!conventionalSeekEnabledRef.current || scrollLockRef.current || !showReaderDisplay) return;
     if (scrollEndTimeoutRef.current) {
       window.clearTimeout(scrollEndTimeoutRef.current);
     }
@@ -4804,44 +4811,7 @@ function App() {
             {!showReaderDisplay && showConventional && conventionalMode === 'rendered' && (
               <ConventionalRendered ref={conventionalRef} content={renderedMarkdown} />
             )}
-            {!showReaderDisplay && (
-              <div className="inline-view-controls">
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={showReaderDisplay}
-                    onChange={(event) => setShowReaderDisplay(event.target.checked)}
-                  />
-                  <span>Show word</span>
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={showConventional}
-                    onChange={(event) => setShowConventional(event.target.checked)}
-                  />
-                  <span>Show view</span>
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={conventionalMode === 'rendered'}
-                    onChange={(event) => setConventionalMode(event.target.checked ? 'rendered' : 'excerpt')}
-                    disabled={!showConventional}
-                  />
-                  <span>Rendered</span>
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={autoFollowConventional}
-                    onChange={(event) => setAutoFollowConventional(event.target.checked)}
-                    disabled={!showConventional || conventionalMode !== 'excerpt'}
-                  />
-                  <span>Auto-follow</span>
-                </label>
-              </div>
-            )}
+            {/* Inline controls removed — deck buttons handle Word/Text/Both toggling */}
 
             <div className="deck-panel">
               <div className="deck-header">
@@ -4874,7 +4844,9 @@ function App() {
                   className="deck-btn mode"
                   onClick={() => {
                     if (showReaderDisplay && showConventional) {
+                      // Switch to text-only: force excerpt mode for highlighting + auto-follow
                       setShowReaderDisplay(false);
+                      setConventionalMode('excerpt');
                       setAutoFollowConventional(true);
                       if (viewMode === 'focus') handleViewModeChange('focus-text');
                     } else if (!showReaderDisplay && showConventional) {
@@ -4884,6 +4856,7 @@ function App() {
                     } else {
                       setShowReaderDisplay(true);
                       setShowConventional(true);
+                      setConventionalMode('excerpt');
                       setAutoFollowConventional(true);
                       if (viewMode === 'focus') handleViewModeChange('focus-text');
                     }
@@ -5306,69 +5279,17 @@ function App() {
             <ConventionalRendered ref={conventionalRef} content={renderedMarkdown} />
           )}
 
-          <div className="toggle-row conventional-toggles">
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={showReaderDisplay}
-                onChange={(event) => setShowReaderDisplay(event.target.checked)}
-              />
-              <span>Show word</span>
-            </label>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={showConventional}
-                onChange={(event) => setShowConventional(event.target.checked)}
-              />
-              <span>Show view</span>
-            </label>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={conventionalMode === 'rendered'}
-                onChange={(event) => setConventionalMode(event.target.checked ? 'rendered' : 'excerpt')}
-                disabled={!showConventional}
-              />
-              <span>Rendered markdown</span>
-            </label>
-            <button
-              type="button"
-              className="ghost small"
-              onClick={() => {
-                setConventionalMode('rendered');
-                setShowConventional(true);
-              }}
-              disabled={conventionalMode === 'rendered'}
-            >
-              Reset view mode
-            </button>
-            {conventionalMode === 'excerpt' && (
+          {showConventional && conventionalMode === 'excerpt' && (
+            <div className="toggle-row conventional-toggles">
               <label className="toggle">
                 <input
                   type="checkbox"
                   checked={conventionalSeekEnabled}
                   onChange={(event) => setConventionalSeekEnabled(event.target.checked)}
-                  disabled={!showConventional}
                 />
                 <span>Scroll to seek</span>
               </label>
-            )}
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={autoFollowConventional}
-                onChange={(event) => setAutoFollowConventional(event.target.checked)}
-                disabled={!showConventional || conventionalMode !== 'excerpt'}
-              />
-              <span>Auto-follow</span>
-            </label>
-          </div>
-          {showConventional && conventionalMode === 'excerpt' && (
-            <p className="hint">Scrolling the excerpt moves the reader to the word near the top edge.</p>
-          )}
-          {showConventional && conventionalMode === 'rendered' && (
-            <p className="hint">Rendered view is read-only. Switch to Excerpt to scroll/seek.</p>
+            </div>
           )}
 
           <div className="panel-header">
