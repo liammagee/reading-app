@@ -1097,6 +1097,7 @@ function App() {
   const conventionalBoostTimeoutRef = useRef<number | null>(null);
   const conventionalBufferBoostRef = useRef(0);
   const prevActiveRangeRef = useRef<{ start: number; end: number } | null>(null);
+  const prevChunkClassRef = useRef<number>(-1);
   const isPlayingRef = useRef(false);
   const conventionalSeekEnabledRef = useRef(true);
   const wordIndexRef = useRef(0);
@@ -2158,7 +2159,22 @@ function App() {
       }
     }
     prevActiveRangeRef.current = activeSegmentRange;
-  }, [activeSegmentRange, conventionalMode, conventionalWindow, showConventional, tokens.length]);
+
+    // Classify chunks: read / current / upcoming
+    const chunkSize = getConventionalChunkSize(tokens.length);
+    if (chunkSize > 0) {
+      const currentChunkIdx = Math.floor(wordIndex / chunkSize);
+      if (currentChunkIdx !== prevChunkClassRef.current) {
+        const chunks = container.querySelectorAll<HTMLElement>('[data-chunk-index]');
+        for (const chunk of chunks) {
+          const idx = Number(chunk.dataset.chunkIndex);
+          chunk.classList.toggle('chunk-read', idx < currentChunkIdx);
+          chunk.classList.toggle('chunk-current', idx === currentChunkIdx);
+        }
+        prevChunkClassRef.current = currentChunkIdx;
+      }
+    }
+  }, [activeSegmentRange, conventionalMode, conventionalWindow, showConventional, tokens.length, wordIndex]);
 
   useEffect(() => {
     if (ttsAvailable === false && ttsEnabled) {
@@ -4619,110 +4635,6 @@ function App() {
             )}
           </div>
 
-          <div className="deck-panel nav-deck">
-            <div className="deck-header">
-              <span className="deck-label">Navigator Deck</span>
-              <span className="deck-led" aria-hidden="true" />
-            </div>
-            <label className="progress deck-progress">
-              <span>Navigate</span>
-              <input
-                type="range"
-                min={0}
-                max={Math.max(0, tokens.length - 1)}
-                value={Math.min(wordIndex, Math.max(0, tokens.length - 1))}
-                onChange={(event) => handleSeek(Number(event.target.value))}
-                disabled={!tokens.length}
-              />
-            </label>
-
-            {sourceKind === 'pdf' && pdfState && (
-              <div className="page-nav">
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => jumpToPage((activePageNumber ?? pageRange.start) - 1)}
-                  disabled={(activePageNumber ?? pageRange.start) <= pageRange.start}
-                >
-                  Prev Page
-                </button>
-                <div className="page-status">
-                  Page {activePageNumber ?? pageRange.start} / {pdfState.pageCount}{' '}
-                  <span className="page-range">({pageRange.start}-{pageRange.end})</span>
-                </div>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => jumpToPage((activePageNumber ?? pageRange.start) + 1)}
-                  disabled={(activePageNumber ?? pageRange.start) >= pageRange.end}
-                >
-                  Next Page
-                </button>
-              </div>
-            )}
-
-            <div className="jump-nav">
-              {showPageJump && (
-                <div className="jump-field">
-                  <span>Go to page</span>
-                  <div className="jump-input">
-                    <input
-                      type="number"
-                      min={1}
-                      max={pageJumpMax}
-                      inputMode="numeric"
-                      value={jumpPage}
-                      onChange={(event) => setJumpPage(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          event.preventDefault();
-                          handleJumpToPage();
-                        }
-                      }}
-                      placeholder={pageJumpPlaceholder}
-                      disabled={pageJumpDisabled}
-                    />
-                    <button type="button" className="ghost small" onClick={handleJumpToPage} disabled={pageJumpDisabled}>
-                      Go
-                    </button>
-                  </div>
-                </div>
-              )}
-              <div className="jump-field">
-                <span>Go to %</span>
-                <div className="jump-input">
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={1}
-                    inputMode="numeric"
-                    value={jumpPercent}
-                    onChange={(event) => setJumpPercent(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault();
-                        handleJumpToPercent();
-                      }
-                    }}
-                    placeholder="0-100"
-                    disabled={!tokens.length}
-                  />
-                  <button
-                    type="button"
-                    className="ghost small"
-                    onClick={handleJumpToPercent}
-                    disabled={!tokens.length}
-                  >
-                    Go
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <BookmarksPanel onClear={handleClearBookmarks} bookmarkRows={bookmarkRows} notice={bookmarkNotice} />
-          </div>
-
           <p className="hint">
             Kindle/EPUB imports require DRM-free exports. PDF text extraction is best on text-based PDFs.
           </p>
@@ -5180,6 +5092,110 @@ function App() {
                 </div>
               </div>
             )}
+          </div>
+
+          <div className="deck-panel nav-deck">
+            <div className="deck-header">
+              <span className="deck-label">Navigator Deck</span>
+              <span className="deck-led" aria-hidden="true" />
+            </div>
+            <label className="progress deck-progress">
+              <span>Navigate</span>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0, tokens.length - 1)}
+                value={Math.min(wordIndex, Math.max(0, tokens.length - 1))}
+                onChange={(event) => handleSeek(Number(event.target.value))}
+                disabled={!tokens.length}
+              />
+            </label>
+
+            {sourceKind === 'pdf' && pdfState && (
+              <div className="page-nav">
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => jumpToPage((activePageNumber ?? pageRange.start) - 1)}
+                  disabled={(activePageNumber ?? pageRange.start) <= pageRange.start}
+                >
+                  Prev Page
+                </button>
+                <div className="page-status">
+                  Page {activePageNumber ?? pageRange.start} / {pdfState.pageCount}{' '}
+                  <span className="page-range">({pageRange.start}-{pageRange.end})</span>
+                </div>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => jumpToPage((activePageNumber ?? pageRange.start) + 1)}
+                  disabled={(activePageNumber ?? pageRange.start) >= pageRange.end}
+                >
+                  Next Page
+                </button>
+              </div>
+            )}
+
+            <div className="jump-nav">
+              {showPageJump && (
+                <div className="jump-field">
+                  <span>Go to page</span>
+                  <div className="jump-input">
+                    <input
+                      type="number"
+                      min={1}
+                      max={pageJumpMax}
+                      inputMode="numeric"
+                      value={jumpPage}
+                      onChange={(event) => setJumpPage(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          handleJumpToPage();
+                        }
+                      }}
+                      placeholder={pageJumpPlaceholder}
+                      disabled={pageJumpDisabled}
+                    />
+                    <button type="button" className="ghost small" onClick={handleJumpToPage} disabled={pageJumpDisabled}>
+                      Go
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="jump-field">
+                <span>Go to %</span>
+                <div className="jump-input">
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={1}
+                    inputMode="numeric"
+                    value={jumpPercent}
+                    onChange={(event) => setJumpPercent(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        handleJumpToPercent();
+                      }
+                    }}
+                    placeholder="0-100"
+                    disabled={!tokens.length}
+                  />
+                  <button
+                    type="button"
+                    className="ghost small"
+                    onClick={handleJumpToPercent}
+                    disabled={!tokens.length}
+                  >
+                    Go
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <BookmarksPanel onClear={handleClearBookmarks} bookmarkRows={bookmarkRows} notice={bookmarkNotice} />
           </div>
 
           <div className="find-panel">
