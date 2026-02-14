@@ -3232,8 +3232,13 @@ function App() {
     [conventionalMode, ensureConventionalWindowForIndex, showConventional, tokens.length],
   );
 
+  // In text-only mode (reader hidden), always auto-follow the cursor.
+  // In dual mode, only auto-follow during playback when the toggle is on.
+  const textOnlyMode = showConventional && !showReaderDisplay;
+  const shouldAutoFollow = textOnlyMode || (autoFollowConventional && isPlaying);
+
   useEffect(() => {
-    if (!autoFollowConventional || !showConventional || !isPlaying || conventionalMode !== 'excerpt') return;
+    if (!shouldAutoFollow || !showConventional || conventionalMode !== 'excerpt') return;
     const container = conventionalRef.current;
     if (!container) return;
     const activeWord = container.querySelector(`[data-word-index="${wordIndex}"]`) as HTMLElement | null;
@@ -3256,7 +3261,7 @@ function App() {
         }, 120);
       }
     });
-  }, [autoFollowConventional, conventionalMode, scrollConventionalToIndex, showConventional, isPlaying, wordIndex]);
+  }, [shouldAutoFollow, conventionalMode, scrollConventionalToIndex, showConventional, wordIndex]);
 
   const handleSeek = useCallback(
     (nextIndex: number, options?: { pause?: boolean; focusConventional?: boolean; scrollBehavior?: ScrollBehavior }) => {
@@ -4798,6 +4803,44 @@ function App() {
             )}
             {!showReaderDisplay && showConventional && conventionalMode === 'rendered' && (
               <ConventionalRendered ref={conventionalRef} content={renderedMarkdown} />
+            )}
+            {!showReaderDisplay && (
+              <div className="inline-view-controls">
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={showReaderDisplay}
+                    onChange={(event) => setShowReaderDisplay(event.target.checked)}
+                  />
+                  <span>Show word</span>
+                </label>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={showConventional}
+                    onChange={(event) => setShowConventional(event.target.checked)}
+                  />
+                  <span>Show view</span>
+                </label>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={conventionalMode === 'rendered'}
+                    onChange={(event) => setConventionalMode(event.target.checked ? 'rendered' : 'excerpt')}
+                    disabled={!showConventional}
+                  />
+                  <span>Rendered</span>
+                </label>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={autoFollowConventional}
+                    onChange={(event) => setAutoFollowConventional(event.target.checked)}
+                    disabled={!showConventional || conventionalMode !== 'excerpt'}
+                  />
+                  <span>Auto-follow</span>
+                </label>
+              </div>
             )}
 
             <div className="deck-panel">

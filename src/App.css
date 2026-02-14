@@ -279,6 +279,13 @@
   font-family: var(--deck-font);
 }
 
+.login-hint {
+  font-size: 0.7rem;
+  color: rgba(244, 239, 228, 0.7);
+  margin: 0;
+  font-family: var(--deck-font);
+}
+
 .login-sent-msg {
   font-size: 0.75rem;
   color: rgba(245, 241, 232, 0.8);
@@ -2089,6 +2096,25 @@
   border-top: 1px solid rgba(27, 26, 21, 0.1);
 }
 
+.inline-view-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(18, 16, 14, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.inline-view-controls .toggle {
+  color: rgba(244, 239, 228, 0.8);
+  font-size: 0.78rem;
+}
+
+.inline-view-controls .toggle input:disabled + span {
+  opacity: 0.4;
+}
+
 .conventional-toggles + .hint {
   margin-top: 6px;
 }
@@ -2101,77 +2127,180 @@
   color: var(--ink-muted);
 }
 
+/* ─── Reading surface ─────────────────────────────────────── */
+
 .snippet {
   font-family: var(--serif-font);
-  font-size: 0.95rem;
-  line-height: 1.6;
-  padding: 14px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.85);
-  border: 1px solid var(--panel-border);
+  font-size: var(--read-font-size);
+  line-height: var(--read-line-height);
+  letter-spacing: var(--read-letter-spacing);
+  font-feature-settings: 'liga' 1, 'clig' 1, 'onum' 1;
+  -webkit-font-smoothing: antialiased;
+  padding: 28px 32px;
+  border-radius: 16px;
+  background: linear-gradient(
+    168deg,
+    rgba(255, 255, 255, 0.92) 0%,
+    rgba(252, 249, 243, 0.88) 100%
+  );
+  border: 1px solid rgba(27, 26, 21, 0.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 1px 3px rgba(20, 18, 12, 0.04);
   max-height: 240px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  color: var(--ink);
+  word-spacing: 0.02em;
+  hanging-punctuation: first allow-end last;
+  text-wrap: pretty;
+  hyphens: auto;
+  -webkit-hyphens: auto;
 }
 
+/* Thin warm scrollbar */
+.snippet::-webkit-scrollbar {
+  width: 6px;
+}
+
+.snippet::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.snippet::-webkit-scrollbar-thumb {
+  background: rgba(27, 26, 21, 0.1);
+  border-radius: 3px;
+  transition: background 0.3s ease;
+}
+
+.snippet:hover::-webkit-scrollbar-thumb {
+  background: rgba(27, 26, 21, 0.18);
+}
+
+.snippet {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(27, 26, 21, 0.1) transparent;
+}
+
+/* Full-height reading surface — fills available panel space */
 .snippet.full {
-  max-height: 360px;
+  flex: 1;
+  min-height: 200px;
+  max-height: calc(100dvh - 320px);
 }
 
 .snippet.secondary {
   background: rgba(248, 240, 228, 0.85);
 }
 
+/* ─── Rendered markdown reading ──────────────────────────── */
+
 .snippet.rendered {
-  font-family: var(--serif-font);
-  font-size: 0.98rem;
-  line-height: 1.7;
+  font-size: var(--read-font-size);
+  line-height: var(--read-line-height);
+  max-width: var(--read-measure);
 }
 
 .snippet.rendered p {
-  margin: 0 0 0.9rem;
+  margin: 0 0 1.1em;
+}
+
+.snippet.rendered p + p {
+  text-indent: 1.5em;
+  margin-top: -0.2em;
 }
 
 .snippet.rendered h1,
 .snippet.rendered h2,
 .snippet.rendered h3 {
-  margin: 0 0 0.6rem;
+  font-family: var(--body-font);
   font-weight: 600;
+  letter-spacing: 0.01em;
+  margin: 1.6em 0 0.6em;
+  line-height: 1.3;
+}
+
+.snippet.rendered h1 { font-size: 1.5em; }
+.snippet.rendered h2 { font-size: 1.25em; }
+.snippet.rendered h3 { font-size: 1.1em; }
+
+.snippet.rendered h1:first-child,
+.snippet.rendered h2:first-child,
+.snippet.rendered h3:first-child {
+  margin-top: 0;
 }
 
 .snippet.rendered ul,
 .snippet.rendered ol {
-  padding-left: 20px;
-  margin: 0 0 0.9rem;
+  padding-left: 1.5em;
+  margin: 0 0 1.1em;
+}
+
+.snippet.rendered li + li {
+  margin-top: 0.3em;
 }
 
 .snippet.rendered blockquote {
-  margin: 0 0 0.9rem;
-  padding-left: 12px;
-  border-left: 3px solid var(--panel-border);
+  margin: 1.2em 0;
+  padding: 0.1em 0 0.1em 1.2em;
+  border-left: 2px solid rgba(255, 107, 61, 0.35);
   color: var(--ink-muted);
+  font-style: italic;
 }
 
 .snippet.rendered code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  background: rgba(27, 26, 21, 0.08);
-  padding: 0 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.88em;
+  background: rgba(27, 26, 21, 0.06);
+  padding: 0.15em 0.35em;
   border-radius: 4px;
 }
 
 .snippet.rendered pre {
-  background: rgba(27, 26, 21, 0.08);
-  padding: 12px;
+  background: rgba(27, 26, 21, 0.05);
+  padding: 16px 18px;
   border-radius: 10px;
-  overflow: auto;
+  overflow-x: auto;
+  line-height: 1.55;
+  margin: 1.2em 0;
+}
+
+.snippet.rendered pre code {
+  background: none;
+  padding: 0;
 }
 
 .snippet.rendered a {
   color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.15em;
+  transition: color 0.15s ease;
 }
+
+.snippet.rendered a:hover {
+  color: #e4572e;
+}
+
+.snippet.rendered hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--panel-border), transparent);
+  margin: 2em 0;
+}
+
+.snippet.rendered img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+/* ─── Excerpt chunks & words ─────────────────────────────── */
 
 .excerpt-chunk {
   display: block;
   width: 100%;
+  max-width: var(--read-measure);
 }
 
 .excerpt-spacer {
@@ -2179,19 +2308,82 @@
   pointer-events: none;
 }
 
-.snippet .word.is-active {
-  background: var(--accent-soft);
-  border-radius: 6px;
-  padding: 2px 4px;
+/* Progressive read: already-read chunks dim gently */
+.excerpt-chunk.chunk-read .word {
+  color: var(--read-dimmed);
+  transition: color 0.6s ease;
 }
 
+/* Current chunk is full contrast */
+.excerpt-chunk.chunk-current .word {
+  color: var(--ink);
+}
+
+/* Word interaction */
 .snippet .word {
   cursor: pointer;
+  border-radius: 3px;
+  transition:
+    background 0.15s ease,
+    color 0.4s ease,
+    box-shadow 0.2s ease;
 }
 
 .snippet .word:hover {
-  background: rgba(228, 87, 46, 0.12);
-  border-radius: 6px;
+  background: rgba(255, 107, 61, 0.08);
+}
+
+/* Active word — warm reading lamp glow */
+.snippet .word.is-active {
+  background: var(--read-glow);
+  box-shadow: 0 0 12px var(--read-glow), 0 0 4px rgba(255, 180, 120, 0.2);
+  border-radius: 3px;
+  padding: 1px 3px;
+  margin: -1px -3px;
+  color: var(--ink);
+  transition:
+    background 0.1s ease,
+    box-shadow 0.1s ease;
+}
+
+/* When playing, the glow pulses subtly */
+@keyframes reading-pulse {
+  0%, 100% { box-shadow: 0 0 12px var(--read-glow), 0 0 4px rgba(255, 180, 120, 0.2); }
+  50% { box-shadow: 0 0 18px var(--read-glow-strong), 0 0 6px rgba(255, 180, 120, 0.3); }
+}
+
+/* ─── View-mode-specific reading enhancements ────────────── */
+
+/* Focus-text: the reading surface IS the experience */
+.app-shell.view-focus-text .snippet.full,
+.app-shell.view-focus .snippet.full {
+  padding: 36px 40px;
+  border-radius: 20px;
+  font-size: calc(var(--read-font-size) * 1.05);
+  max-height: calc(100dvh - 240px);
+  background: linear-gradient(
+    172deg,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(253, 250, 244, 0.92) 50%,
+    rgba(248, 244, 234, 0.9) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    0 4px 24px rgba(20, 18, 12, 0.08),
+    0 1px 3px rgba(20, 18, 12, 0.04);
+}
+
+/* Mobile/stack: generous touch-friendly reading */
+.app-shell.view-mobile .snippet.full {
+  padding: 24px 22px;
+  border-radius: 16px;
+  font-size: calc(var(--read-font-size) * 1.02);
+  max-height: calc(100dvh - 280px);
+}
+
+/* Deck mode: companion panel text is slightly tighter */
+.companion-panel .snippet.full {
+  padding: 20px 24px;
 }
 
 .companion {
@@ -2430,7 +2622,7 @@
   }
 
   .snippet.full {
-    max-height: 280px;
+    padding: 20px 18px;
   }
 
   .display-context {
