@@ -4875,6 +4875,18 @@ function App() {
               />
             </div>
             )}
+            {!showReaderDisplay && showConventional && conventionalMode === 'excerpt' && (
+              <ConventionalExcerpt
+                ref={conventionalRef}
+                nodes={conventionalNodes}
+                spacerHeights={conventionalSpacerHeights}
+                onScroll={handleConventionalScroll}
+                onClick={handleConventionalClick}
+              />
+            )}
+            {!showReaderDisplay && showConventional && conventionalMode === 'rendered' && (
+              <ConventionalRendered ref={conventionalRef} content={renderedMarkdown} />
+            )}
 
             <div className="deck-panel">
               <div className="deck-header">
@@ -5222,7 +5234,7 @@ function App() {
         </section>
 
         <section className="panel companion-panel">
-          {showConventional && conventionalMode === 'excerpt' && (
+          {showReaderDisplay && showConventional && conventionalMode === 'excerpt' && (
             <ConventionalExcerpt
               ref={conventionalRef}
               nodes={conventionalNodes}
@@ -5231,7 +5243,7 @@ function App() {
               onClick={handleConventionalClick}
             />
           )}
-          {showConventional && conventionalMode === 'rendered' && (
+          {showReaderDisplay && showConventional && conventionalMode === 'rendered' && (
             <ConventionalRendered ref={conventionalRef} content={renderedMarkdown} />
           )}
 
