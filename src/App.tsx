@@ -1,4 +1,5 @@
 import {
+  Fragment,
   forwardRef,
   memo,
   startTransition,
@@ -79,6 +80,7 @@ type UserPreferences = {
   showReaderDisplay?: boolean;
   conventionalSeekEnabled?: boolean;
   autoFollowConventional?: boolean;
+  scrollMode?: 'page' | 'flow';
   audioCuesEnabled?: boolean;
   viewMode?: ViewMode;
   cameraEnabled?: boolean;
@@ -935,6 +937,8 @@ function App() {
   const [jumpPercent, setJumpPercent] = useState('');
   const [pageOffsets, setPageOffsets] = useState<number[]>([]);
   const [isPdfBusy, setIsPdfBusy] = useState(false);
+  const [importUrl, setImportUrl] = useState('');
+  const [isUrlImporting, setIsUrlImporting] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [ttsAvailable, setTtsAvailable] = useState<boolean | null>(null);
   const [ttsVoices, setTtsVoices] = useState<string[]>([]);
@@ -946,6 +950,7 @@ function App() {
   const [ttsChecking, setTtsChecking] = useState(false);
   const [conventionalSeekEnabled, setConventionalSeekEnabled] = useState(true);
   const [autoFollowConventional, setAutoFollowConventional] = useState(true);
+  const [scrollMode, setScrollMode] = useState<'page' | 'flow'>('page');
   const [audioCuesEnabled, setAudioCuesEnabled] = useState(true);
   const [primaryNotice, setPrimaryNotice] = useState<Notice | null>(null);
   const [cameraEnabled, setCameraEnabled] = useState(false);
@@ -1098,6 +1103,8 @@ function App() {
   const conventionalBufferBoostRef = useRef(0);
   const prevActiveRangeRef = useRef<{ start: number; end: number } | null>(null);
   const prevChunkClassRef = useRef<number>(-1);
+  const autoScrollRafRef = useRef<number | null>(null);
+  const manualScrollUntilRef = useRef(0);
   const isPlayingRef = useRef(false);
   const conventionalSeekEnabledRef = useRef(true);
   const wordIndexRef = useRef(0);
@@ -1734,6 +1741,9 @@ function App() {
       if (typeof parsed.autoFollowConventional === 'boolean') {
         setAutoFollowConventional(parsed.autoFollowConventional);
       }
+      if (parsed.scrollMode === 'page' || parsed.scrollMode === 'flow') {
+        setScrollMode(parsed.scrollMode);
+      }
       if (typeof parsed.audioCuesEnabled === 'boolean') {
         setAudioCuesEnabled(parsed.audioCuesEnabled);
       }
@@ -1787,6 +1797,7 @@ function App() {
           showReaderDisplay,
           conventionalSeekEnabled,
           autoFollowConventional,
+          scrollMode,
           audioCuesEnabled,
           viewMode,
           cameraEnabled,
@@ -1818,6 +1829,7 @@ function App() {
     };
   }, [
     autoFollowConventional,
+    scrollMode,
     audioCuesEnabled,
     cameraEnabled,
     cameraEyeEnabled,
@@ -2362,6 +2374,36 @@ function App() {
   ]);
 
   const conventionalTokens = useMemo(() => tokens, [tokens]);
+
+  // Compute which token indices mark the start of a new paragraph.
+  // A real paragraph break requires: (a) both sides ≥15 words, and (b) the preceding
+  // block ends with sentence-ending punctuation. This filters out PDF page/column
+  // breaks that land mid-sentence (e.g. "...strive for\n\nomnipotence;").
+  const paragraphStarts = useMemo(() => {
+    const starts = new Set<number>();
+    const paragraphs = sourceText.split(/\n\s*\n/);
+    const MIN_WORDS = 15;
+    const SENTENCE_END = /[.!?]["')\]\u201d\u2019]*$/;
+    let index = 0;
+    let prevWordCount = 0;
+    let prevLastToken = '';
+    for (const para of paragraphs) {
+      const words = tokenize(para);
+      if (
+        index > 0 &&
+        words.length >= MIN_WORDS &&
+        prevWordCount >= MIN_WORDS &&
+        SENTENCE_END.test(prevLastToken)
+      ) {
+        starts.add(index);
+      }
+      prevWordCount = words.length;
+      prevLastToken = words.length ? words[words.length - 1] : '';
+      index += words.length;
+    }
+    return starts;
+  }, [sourceText]);
+
   const conventionalChunkSize = useMemo(
     () => getConventionalChunkSize(conventionalTokens.length),
     [conventionalTokens.length],
@@ -2446,9 +2488,12 @@ function App() {
           {slice.map((token, offset) => {
             const wordIndex = start + offset;
             return (
-              <span key={`${wordIndex}-${token}`} data-word-index={wordIndex} className="word">
-                {token}{' '}
-              </span>
+              <Fragment key={`${wordIndex}-${token}`}>
+                {paragraphStarts.has(wordIndex) && <span className="para-break" aria-hidden="true" />}
+                <span data-word-index={wordIndex} className="word">
+                  {token}{' '}
+                </span>
+              </Fragment>
             );
           })}
         </div>,
@@ -2461,6 +2506,7 @@ function App() {
     conventionalMode,
     conventionalTokens,
     conventionalWindow,
+    paragraphStarts,
     registerConventionalChunk,
   ]);
   const updateConventionalWindowForChunk = useCallback(
@@ -3244,8 +3290,38 @@ function App() {
   const textOnlyMode = showConventional && !showReaderDisplay;
   const shouldAutoFollow = textOnlyMode || (autoFollowConventional && isPlaying);
 
+  // Eased scroll animation — cancellable, with proportional duration.
+  const animateScroll = useCallback((container: HTMLElement, targetTop: number, durationMs: number) => {
+    if (autoScrollRafRef.current) {
+      cancelAnimationFrame(autoScrollRafRef.current);
+      autoScrollRafRef.current = null;
+    }
+    const start = container.scrollTop;
+    const distance = targetTop - start;
+    if (Math.abs(distance) < 1) return;
+    const startTime = performance.now();
+    scrollLockRef.current = true;
+    const step = (now: number) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / durationMs, 1);
+      const eased = 1 - (1 - progress) ** 3;
+      container.scrollTop = start + distance * eased;
+      if (progress < 1) {
+        autoScrollRafRef.current = requestAnimationFrame(step);
+      } else {
+        autoScrollRafRef.current = null;
+        scrollLockRef.current = false;
+      }
+    };
+    autoScrollRafRef.current = requestAnimationFrame(step);
+  }, []);
+
+  // ── Page mode: scroll only when the active word nears the bottom edge,
+  //    then shift up by a full "page" (container height minus one line overlap).
   useEffect(() => {
-    if (!shouldAutoFollow || !showConventional || conventionalMode !== 'excerpt') return;
+    if (!shouldAutoFollow || scrollMode !== 'page') return;
+    if (!showConventional || conventionalMode !== 'excerpt') return;
+    if (performance.now() < manualScrollUntilRef.current) return;
     const container = conventionalRef.current;
     if (!container) return;
     const activeWord = container.querySelector(`[data-word-index="${wordIndex}"]`) as HTMLElement | null;
@@ -3253,22 +3329,41 @@ function App() {
       scrollConventionalToIndex(wordIndex, 'auto');
       return;
     }
-    if (autoFollowRafRef.current) return;
-    autoFollowRafRef.current = window.requestAnimationFrame(() => {
-      autoFollowRafRef.current = null;
-      const rect = container.getBoundingClientRect();
-      const wordRect = activeWord.getBoundingClientRect();
-      const margin = Math.min(80, rect.height * 0.2);
-      if (wordRect.top < rect.top + margin || wordRect.bottom > rect.bottom - margin) {
-        const targetTop = container.scrollTop + (wordRect.top - rect.top) - rect.height / 2 + wordRect.height / 2;
-        scrollLockRef.current = true;
-        container.scrollTo({ top: targetTop, behavior: 'smooth' });
-        window.setTimeout(() => {
-          scrollLockRef.current = false;
-        }, 120);
-      }
-    });
-  }, [shouldAutoFollow, conventionalMode, scrollConventionalToIndex, showConventional, wordIndex]);
+    const rect = container.getBoundingClientRect();
+    const wordRect = activeWord.getBoundingClientRect();
+    const lineHeight = parseFloat(getComputedStyle(container).lineHeight) || 32;
+    // Trigger when the word is within 1.5 lines of the bottom edge
+    const bottomThreshold = rect.bottom - lineHeight * 1.5;
+    // Also trigger if the word is above the top (e.g. after a seek)
+    if (wordRect.bottom > bottomThreshold || wordRect.top < rect.top) {
+      // Scroll so the word lands ~1 line from the top (page-turn with context overlap)
+      const targetTop = container.scrollTop + (wordRect.top - rect.top) - lineHeight;
+      animateScroll(container, targetTop, 250);
+    }
+  }, [shouldAutoFollow, scrollMode, conventionalMode, animateScroll, scrollConventionalToIndex, showConventional, wordIndex]);
+
+  // ── Flow mode: continuous smooth scroll keeping the active word at 1/3 from top.
+  //    Scroll velocity is proportional to the word-advance rate so text drifts steadily.
+  useEffect(() => {
+    if (!shouldAutoFollow || scrollMode !== 'flow') return;
+    if (!showConventional || conventionalMode !== 'excerpt') return;
+    if (performance.now() < manualScrollUntilRef.current) return;
+    const container = conventionalRef.current;
+    if (!container) return;
+    const activeWord = container.querySelector(`[data-word-index="${wordIndex}"]`) as HTMLElement | null;
+    if (!activeWord) {
+      scrollConventionalToIndex(wordIndex, 'auto');
+      return;
+    }
+    const rect = container.getBoundingClientRect();
+    const wordRect = activeWord.getBoundingClientRect();
+    const anchorY = rect.top + rect.height * 0.33;
+    const offset = wordRect.top - anchorY;
+    if (Math.abs(offset) < 2) return;
+    // Duration matches the inter-word interval so scroll is continuous
+    const msPerWord = 60000 / Math.max(wpm, 120);
+    animateScroll(container, container.scrollTop + offset, msPerWord);
+  }, [shouldAutoFollow, scrollMode, conventionalMode, animateScroll, scrollConventionalToIndex, showConventional, wordIndex, wpm]);
 
   const handleSeek = useCallback(
     (nextIndex: number, options?: { pause?: boolean; focusConventional?: boolean; scrollBehavior?: ScrollBehavior }) => {
@@ -3278,6 +3373,8 @@ function App() {
         setIsPlaying(false);
         stopTtsPlayback();
       }
+      // Reset manual-scroll cooldown so auto-follow resumes after explicit navigation
+      manualScrollUntilRef.current = 0;
       setWordIndex(clampedIndex);
       if (options?.focusConventional) {
         scrollConventionalToIndex(clampedIndex, options.scrollBehavior ?? 'smooth');
@@ -3332,6 +3429,8 @@ function App() {
   const handleTogglePlay = useCallback(() => {
     if (!tokensRef.current.length) return;
     const nextState = !isPlayingRef.current;
+    // Reset manual-scroll cooldown so auto-follow resumes on play
+    manualScrollUntilRef.current = 0;
     setIsPlaying(nextState);
     playCue(nextState ? 'start' : 'pause');
   }, [playCue]);
@@ -3540,6 +3639,10 @@ function App() {
   const handleConventionalScroll = () => {
     if (conventionalMode !== 'excerpt') return;
     const container = conventionalRef.current;
+    // If scrollLockRef is false, this is a user-initiated scroll — suppress auto-follow
+    if (container && !scrollLockRef.current) {
+      manualScrollUntilRef.current = performance.now() + 3000;
+    }
     if (container) {
       const now = performance.now();
       const lastTop = lastConventionalScrollTopRef.current;
@@ -3630,6 +3733,10 @@ function App() {
       if (autoFollowRafRef.current) {
         window.cancelAnimationFrame(autoFollowRafRef.current);
         autoFollowRafRef.current = null;
+      }
+      if (autoScrollRafRef.current) {
+        cancelAnimationFrame(autoScrollRafRef.current);
+        autoScrollRafRef.current = null;
       }
     };
   }, []);
@@ -3907,6 +4014,76 @@ function App() {
       console.error('Failed to read DOCX:', error);
       setNotice({ kind: 'error', message: 'Failed to read Word document.' });
       return { text: '', wordCount: 0 };
+    }
+  };
+
+  const handleUrlImport = async () => {
+    const url = importUrl.trim();
+    if (!url) return;
+
+    // Extract Google Docs ID from URL
+    const match = url.match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)/);
+    if (!match) {
+      setPrimaryNotice({ kind: 'error', message: 'Not a valid Google Docs URL.' });
+      return;
+    }
+    const docId = match[1];
+    const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=html`;
+
+    setIsUrlImporting(true);
+    setPrimaryNotice({ kind: 'info', message: 'Fetching Google Doc...' });
+
+    try {
+      const res = await fetch('/api/fetch-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: exportUrl }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setPrimaryNotice({ kind: 'error', message: data.error || 'Failed to fetch document.' });
+        return;
+      }
+
+      const text = extractEpubHtmlText(data.html);
+      if (!text.trim()) {
+        setPrimaryNotice({ kind: 'error', message: 'No readable text found in document.' });
+        return;
+      }
+
+      const wordCount = tokenize(text).length;
+      const docTitle = data.title || 'Google Doc';
+
+      setSourceKind('text');
+      setPdfState(null);
+      setPageOffsets([]);
+      setPageRange({ start: 1, end: 1 });
+      setPageRangeDraft({ start: 1, end: 1 });
+      startTransition(() => {
+        setSourceText(text);
+        setTitle(docTitle);
+      });
+      setWordIndex(0);
+      setIsPlaying(false);
+      setImportUrl('');
+
+      const nextDoc: StoredDocument = {
+        id: `reader:text:gdoc:${docId}`,
+        sourceText: text,
+        title: docTitle,
+        sourceKind: 'text',
+        primaryFileMeta: null,
+        wordCount,
+        updatedAt: Date.now(),
+      };
+      persistStoredDocument(nextDoc);
+      setPrimaryNotice({ kind: 'success', message: `Google Doc loaded (${wordCount.toLocaleString()} words)` });
+    } catch (err) {
+      console.error('URL import failed:', err);
+      setPrimaryNotice({ kind: 'error', message: 'Failed to fetch document. Check your connection.' });
+    } finally {
+      setIsUrlImporting(false);
     }
   };
 
@@ -4513,6 +4690,31 @@ function App() {
               />
             </label>
             <p className="hint">Drop a text, EPUB, PDF, HTML, or Word file to load the deck.</p>
+            <div className="url-import">
+              <label className="field">
+                <span>Import from Google Docs URL</span>
+                <div className="url-import-row">
+                  <input
+                    type="url"
+                    value={importUrl}
+                    onChange={(e) => setImportUrl(e.target.value)}
+                    placeholder="https://docs.google.com/document/d/..."
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleUrlImport();
+                    }}
+                    disabled={isUrlImporting}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleUrlImport}
+                    disabled={isUrlImporting || !importUrl.trim()}
+                  >
+                    {isUrlImporting ? 'Importing...' : 'Import'}
+                  </button>
+                </div>
+              </label>
+              <p className="hint">Paste a public Google Docs link to import its text.</p>
+            </div>
           </div>
           {primaryNotice && (
             <div className="notice-row">
@@ -4864,6 +5066,16 @@ function App() {
                 >
                   {showReaderDisplay && showConventional ? 'Both' : showReaderDisplay ? 'Word' : 'Text'}
                 </button>
+                {showConventional && (
+                  <button
+                    type="button"
+                    className={`deck-btn mode`}
+                    onClick={() => setScrollMode((m) => m === 'page' ? 'flow' : 'page')}
+                    title={scrollMode === 'page' ? 'Page mode: shifts at bottom edge' : 'Flow mode: continuous scroll'}
+                  >
+                    {scrollMode === 'page' ? 'Page' : 'Flow'}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="deck-btn back"
@@ -4885,6 +5097,110 @@ function App() {
                 Hotkeys: Space play/pause, Left/Right back/next, Shift + Left/Right sentence, Up/Down speed, V view,
                 F fullscreen, B bookmark, ? help.
               </p>
+            </div>
+
+            <div className="deck-panel nav-deck">
+              <div className="deck-header">
+                <span className="deck-label">Navigator Deck</span>
+                <span className="deck-led" aria-hidden="true" />
+              </div>
+              <label className="progress deck-progress">
+                <span>Navigate</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0, tokens.length - 1)}
+                  value={Math.min(wordIndex, Math.max(0, tokens.length - 1))}
+                  onChange={(event) => handleSeek(Number(event.target.value))}
+                  disabled={!tokens.length}
+                />
+              </label>
+
+              {sourceKind === 'pdf' && pdfState && (
+                <div className="page-nav">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => jumpToPage((activePageNumber ?? pageRange.start) - 1)}
+                    disabled={(activePageNumber ?? pageRange.start) <= pageRange.start}
+                  >
+                    Prev Page
+                  </button>
+                  <div className="page-status">
+                    Page {activePageNumber ?? pageRange.start} / {pdfState.pageCount}{' '}
+                    <span className="page-range">({pageRange.start}-{pageRange.end})</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => jumpToPage((activePageNumber ?? pageRange.start) + 1)}
+                    disabled={(activePageNumber ?? pageRange.start) >= pageRange.end}
+                  >
+                    Next Page
+                  </button>
+                </div>
+              )}
+
+              <div className="jump-nav">
+                {showPageJump && (
+                  <div className="jump-field">
+                    <span>Go to page</span>
+                    <div className="jump-input">
+                      <input
+                        type="number"
+                        min={1}
+                        max={pageJumpMax}
+                        inputMode="numeric"
+                        value={jumpPage}
+                        onChange={(event) => setJumpPage(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            handleJumpToPage();
+                          }
+                        }}
+                        placeholder={pageJumpPlaceholder}
+                        disabled={pageJumpDisabled}
+                      />
+                      <button type="button" className="ghost small" onClick={handleJumpToPage} disabled={pageJumpDisabled}>
+                        Go
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <div className="jump-field">
+                  <span>Go to %</span>
+                  <div className="jump-input">
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={1}
+                      inputMode="numeric"
+                      value={jumpPercent}
+                      onChange={(event) => setJumpPercent(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          handleJumpToPercent();
+                        }
+                      }}
+                      placeholder="0-100"
+                      disabled={!tokens.length}
+                    />
+                    <button
+                      type="button"
+                      className="ghost small"
+                      onClick={handleJumpToPercent}
+                      disabled={!tokens.length}
+                    >
+                      Go
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <BookmarksPanel onClear={handleClearBookmarks} bookmarkRows={bookmarkRows} notice={bookmarkNotice} />
             </div>
         </section>
 
@@ -5108,110 +5424,6 @@ function App() {
                 </div>
               </div>
             )}
-          </div>
-
-          <div className="deck-panel nav-deck">
-            <div className="deck-header">
-              <span className="deck-label">Navigator Deck</span>
-              <span className="deck-led" aria-hidden="true" />
-            </div>
-            <label className="progress deck-progress">
-              <span>Navigate</span>
-              <input
-                type="range"
-                min={0}
-                max={Math.max(0, tokens.length - 1)}
-                value={Math.min(wordIndex, Math.max(0, tokens.length - 1))}
-                onChange={(event) => handleSeek(Number(event.target.value))}
-                disabled={!tokens.length}
-              />
-            </label>
-
-            {sourceKind === 'pdf' && pdfState && (
-              <div className="page-nav">
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => jumpToPage((activePageNumber ?? pageRange.start) - 1)}
-                  disabled={(activePageNumber ?? pageRange.start) <= pageRange.start}
-                >
-                  Prev Page
-                </button>
-                <div className="page-status">
-                  Page {activePageNumber ?? pageRange.start} / {pdfState.pageCount}{' '}
-                  <span className="page-range">({pageRange.start}-{pageRange.end})</span>
-                </div>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => jumpToPage((activePageNumber ?? pageRange.start) + 1)}
-                  disabled={(activePageNumber ?? pageRange.start) >= pageRange.end}
-                >
-                  Next Page
-                </button>
-              </div>
-            )}
-
-            <div className="jump-nav">
-              {showPageJump && (
-                <div className="jump-field">
-                  <span>Go to page</span>
-                  <div className="jump-input">
-                    <input
-                      type="number"
-                      min={1}
-                      max={pageJumpMax}
-                      inputMode="numeric"
-                      value={jumpPage}
-                      onChange={(event) => setJumpPage(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          event.preventDefault();
-                          handleJumpToPage();
-                        }
-                      }}
-                      placeholder={pageJumpPlaceholder}
-                      disabled={pageJumpDisabled}
-                    />
-                    <button type="button" className="ghost small" onClick={handleJumpToPage} disabled={pageJumpDisabled}>
-                      Go
-                    </button>
-                  </div>
-                </div>
-              )}
-              <div className="jump-field">
-                <span>Go to %</span>
-                <div className="jump-input">
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={1}
-                    inputMode="numeric"
-                    value={jumpPercent}
-                    onChange={(event) => setJumpPercent(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault();
-                        handleJumpToPercent();
-                      }
-                    }}
-                    placeholder="0-100"
-                    disabled={!tokens.length}
-                  />
-                  <button
-                    type="button"
-                    className="ghost small"
-                    onClick={handleJumpToPercent}
-                    disabled={!tokens.length}
-                  >
-                    Go
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <BookmarksPanel onClear={handleClearBookmarks} bookmarkRows={bookmarkRows} notice={bookmarkNotice} />
           </div>
 
           <div className="find-panel">

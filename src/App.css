@@ -508,6 +508,27 @@
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
 }
 
+.url-import {
+  border-top: 1px solid var(--panel-border);
+  padding-top: 10px;
+}
+
+.url-import-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.url-import-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.url-import-row button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .recent-docs {
   display: grid;
   gap: 10px;
@@ -2301,6 +2322,21 @@
   display: block;
   width: 100%;
   max-width: var(--read-measure);
+  margin: 0 auto;
+  text-align: justify;
+  text-align-last: left;
+  hyphens: none;
+  -webkit-hyphens: none;
+}
+
+.para-break {
+  display: block;
+  height: 1.1em;
+}
+
+/* First word after a paragraph break gets a text indent for book-style paragraphs */
+.para-break + .word {
+  margin-left: 2em;
 }
 
 .excerpt-spacer {
