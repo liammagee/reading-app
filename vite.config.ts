@@ -83,7 +83,7 @@ function googleDocsProxy(): Plugin {
 export default defineConfig({
   base: '/reading/',
   server: {
-    port: 5174,
+    port: 3001,
     host: '0.0.0.0',
     proxy: {
       '/api': {
