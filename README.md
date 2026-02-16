@@ -26,10 +26,12 @@ Vite automatically loads `.env` files. Any variable prefixed with `VITE_` is exp
 Example (`.env`):
 
 ```bash
-VITE_API_BASE_URL=http://localhost:8080
+# Optional: only set when API is on a different origin
+VITE_API_BASE_URL=https://api.example.com
 ```
 
-`VITE_API_BASE_URL` overrides the API base for TTS calls (defaults to same-origin).
+`VITE_API_BASE_URL` overrides the API base for auth/sync/TTS calls (defaults to same-origin).
+For local Vite dev on `localhost:5174`, leaving it unset is recommended so `/api` uses the Vite proxy.
 
 ## Features in This Skeleton
 

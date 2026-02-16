@@ -8,6 +8,8 @@ export type AuthState = {
   isLoading: boolean;
   requestMagicLink: (email: string) => Promise<{ token?: string }>;
   verifyMagicLink: (token: string) => Promise<void>;
+  loginWithPassword: (email: string, password: string) => Promise<void>;
+  registerWithPassword: (email: string, password: string, name?: string) => Promise<void>;
   logout: () => void;
   error: string | null;
 };
@@ -22,6 +24,8 @@ export const useAuth = (): AuthState => {
       isLoading: false,
       requestMagicLink: async () => ({}),
       verifyMagicLink: async () => {},
+      loginWithPassword: async () => {},
+      registerWithPassword: async () => {},
       logout: () => {},
       error: null,
     };

@@ -40,6 +40,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     persistAuth(null, null);
   }, [persistAuth]);
 
+  const consumeSession = useCallback((data: unknown) => {
+    const payload = data as { token?: string; accessToken?: string; user?: AuthState['user'] };
+    const t = payload?.token || payload?.accessToken;
+    const u = payload?.user;
+    if (!t || !u?.id || !u?.email || !u?.role) {
+      throw new Error('Invalid authentication response');
+    }
+    persistAuth(t, { id: u.id, email: u.email, name: u.name, role: u.role });
+  }, [persistAuth]);
+
   // Validate a token against the server
   const validateToken = useCallback(async (t: string): Promise<AuthState['user']> => {
     try {
@@ -133,10 +143,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to send login link');
+      let data: { error?: string; token?: string } | null = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+      if (!res.ok) throw new Error(data?.error || 'Failed to send login link');
       // In dev mode, the server returns the token directly for auto-verify
-      return { token: data.token };
+      return { token: data?.token };
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to send login link';
       setError(msg);
@@ -152,17 +167,69 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: magicToken }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Verification failed');
-      const t = data.token || data.accessToken;
-      const u = data.user;
-      persistAuth(t, { id: u.id, email: u.email, name: u.name, role: u.role });
+      let data: unknown = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+      const payload = data as { error?: string };
+      if (!res.ok) throw new Error(payload?.error || 'Verification failed');
+      consumeSession(data);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Verification failed';
       setError(msg);
       throw err;
     }
-  }, [persistAuth]);
+  }, [consumeSession]);
+
+  const loginWithPassword = useCallback(async (email: string, password: string) => {
+    setError(null);
+    try {
+      const res = await fetch(buildApiUrl('/api/auth/login'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      let data: unknown = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+      const payload = data as { error?: string };
+      if (!res.ok) throw new Error(payload?.error || 'Login failed');
+      consumeSession(data);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Login failed';
+      setError(msg);
+      throw err;
+    }
+  }, [consumeSession]);
+
+  const registerWithPassword = useCallback(async (email: string, password: string, name?: string) => {
+    setError(null);
+    try {
+      const res = await fetch(buildApiUrl('/api/auth/register'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, name: name?.trim() || undefined }),
+      });
+      let data: unknown = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+      const payload = data as { error?: string };
+      if (!res.ok) throw new Error(payload?.error || 'Registration failed');
+      await loginWithPassword(email, password);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Registration failed';
+      setError(msg);
+      throw err;
+    }
+  }, [loginWithPassword]);
 
   const logout = useCallback(() => {
     if (token) {
@@ -181,6 +248,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isLoading,
     requestMagicLink,
     verifyMagicLink,
+    loginWithPassword,
+    registerWithPassword,
     logout,
     error,
   };
